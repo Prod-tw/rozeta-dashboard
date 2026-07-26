@@ -1,0 +1,4035 @@
+openapi: 3.0.0
+info:
+  title: Rozeta API
+  description: |-
+    Rozeta API - Meeting Transcription and Translation Service
+
+    This API provides comprehensive meeting transcription and translation services
+    with subscription management and payment processing capabilities.
+
+    Features:
+    - Real-time meeting transcription
+    - Multi-language translation support (34 languages)
+    - Subscription-based credit management
+    - Stripe payment integration
+    - OAuth authentication (Google)
+  version: '1.0'
+tags:
+  - name: Authentication
+  - name: Web Authentication
+  - name: Users
+  - name: Meetings
+  - name: Conversations
+  - name: Context Presets
+  - name: Orders
+  - name: Payments
+  - name: Plans
+  - name: Credits
+  - name: General
+  - name: Broadcasting
+  - name: Waitlist
+  - name: Commands
+paths:
+  /api/v1/auth/login-link:
+    post:
+      operationId: AuthAPIOperations_sendLoginEmail
+      summary: Send login link via email
+      description: |-
+        Send login link via email
+
+        Generates a secure one-time login link and sends it to the user's email.
+        The link is valid for 10 minutes and can only be used once.
+        Uses Cloudflare Turnstile for CAPTCHA verification.
+
+        Note: Always returns success even if email doesn't exist (security by obscurity).
+      parameters: []
+      responses:
+        '200':
+          description: Success response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendLoginEmailResponse'
+        '422':
+          description: Success response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendLoginEmailRequest'
+  /api/v1/auth/logout:
+    post:
+      operationId: AuthAPIOperations_logout
+      summary: Logout user
+      description: |-
+        Logout user
+
+        Invalidates the current authentication session by expiring the auth_token cookie.
+        Sets the cookie expiration to -1 minute, effectively removing it from the client.
+      parameters: []
+      responses:
+        '200':
+          description: Success response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '403':
+          description: Success response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Authentication
+  /api/v1/auth/me:
+    get:
+      operationId: AuthAPIOperations_getUser
+      summary: Get current user profile
+      description: |-
+        Get authenticated user profile
+
+        Returns the current user's profile information including active subscription plan.
+        Response is cached for 600 seconds (10 minutes).
+      parameters: []
+      responses:
+        '200':
+          description: User profile with current plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.UserProfile'
+        '403':
+          description: User profile with current plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Authentication
+  /api/v1/auth/refresh:
+    post:
+      operationId: AuthAPIOperations_refreshToken
+      summary: Refresh authentication token
+      description: |-
+        Refresh authentication token
+
+        Generates a new JWT token and sets it in an HTTP-only cookie.
+        Token expires after 3 days (4320 minutes).
+      parameters: []
+      responses:
+        '200':
+          description: New authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '403':
+          description: New authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Authentication
+  /api/v1/broadcasting/auth:
+    post:
+      operationId: BroadcastingAPIOperations_authenticateBroadcasting
+      summary: Authenticate for WebSocket broadcasting
+      description: |-
+        Authenticate for WebSocket broadcasting
+
+        Authenticates the current user for a specific broadcasting channel/room.
+        Returns a JWT token and full room name for WebSocket connection.
+
+        The token includes:
+        - User ID (sub claim)
+        - Room name
+        - Expiration time (TTL from JWT config)
+
+        Channel types:
+        - Private channels: Requires authentication, prefixed with 'private-'
+        - Presence channels: Requires authentication, prefixed with 'presence-'
+        - Public channels: No authentication required
+
+        Rozeta private channel names:
+        - `meeting.{meeting_id}`
+        - `meeting.transcription.{meeting_id}`
+        - `meeting.translation.{meeting_id}`
+        - `conversation.{conversation_id}` for `conversation.started` and `conversation.paused`
+        - `conversation.transcription.{conversation_id}` for `transcription.created`
+        - `conversation.translation.{conversation_id}` for `translation.created`
+        - `command.{user_id}` for cross-device command events, where `user_id`
+        is the authenticated user's sqid
+
+        Conversation channel ids are conversation ids returned by
+        `POST /api/v1/conversations`, not user ids.
+
+        If room name doesn't include a prefix, it will be automatically prefixed
+        based on the 'prefix' parameter (defaults to 'private-').
+      parameters: []
+      responses:
+        '200':
+          description: Broadcasting authentication token and room name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastingAuthResponse'
+        '403':
+          description: Broadcasting authentication token and room name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessDeniedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Broadcasting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadcastingAuthRequest'
+  /api/v1/commands:
+    post:
+      operationId: CommandAPIOperations_sendCommand
+      summary: Send command
+      description: |-
+        Send command
+
+        Validates that the authenticated user owns the target meeting or
+        conversation, then broadcasts a command event to the user's private
+        Socket.IO command channel.
+
+        Subscribe to `command.{user_id}`, where `user_id` is the authenticated
+        user's sqid. Event names:
+        - `command.goto_meeting`
+        - `command.start_meeting`
+        - `command.pause_meeting`
+        - `command.goto_conversation`
+        - `command.start_conversation`
+        - `command.pause_conversation`
+
+        Meeting command payloads include `{ "meeting_id": "<meeting_sqid>" }`.
+        Conversation command payloads include `{ "conversation_id": "<conversation_uuid>" }`.
+      parameters: []
+      responses:
+        '200':
+          description: Command event dispatched successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Authentication is required to send commands
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '403':
+          description: The authenticated user does not own the target conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessDeniedResponse'
+        '404':
+          description: The target meeting was not found for the authenticated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The command action or target id is invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Commands
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+        description: Command action and target resource
+  /api/v1/context-presets:
+    get:
+      operationId: ContextPresetOperations_getContextPresets
+      summary: List context presets
+      description: |-
+        List user's context presets
+
+        Retrieves a paginated list of context presets for the authenticated user.
+        Context presets allow users to save frequently used transcription contexts
+        for quick reuse across multiple meetings.
+
+        Supports filtering by preset name using partial text matching (case-insensitive).
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: 'Page number for pagination (default: 1)'
+          schema:
+            type: integer
+            format: int32
+          explode: false
+        - name: name
+          in: query
+          required: false
+          description: Optional name filter (partial match using LIKE)
+          schema:
+            type: string
+          explode: false
+      responses:
+        '200':
+          description: Paginated list of context presets
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                  - meta
+                  - links
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Models.ContextPreset'
+                    x-typespec-name: Models.ContextPreset[]
+                    description: Array of items
+                  meta:
+                    allOf:
+                      - $ref: '#/components/schemas/PaginationMeta'
+                    description: Pagination metadata
+                  links:
+                    type: object
+                    properties:
+                      first:
+                        type: string
+                      last:
+                        type: string
+                      next:
+                        type: string
+                        nullable: true
+                      prev:
+                        type: string
+                        nullable: true
+                    required:
+                      - first
+                      - last
+                      - next
+                      - prev
+                    description: Pagination links
+                description: Paginated response wrapper
+                x-typespec-name: PaginatedResponse<Models.ContextPreset>
+        '403':
+          description: Paginated list of context presets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Context Presets
+    post:
+      operationId: ContextPresetOperations_createContextPreset
+      summary: Create context preset
+      description: |-
+        Create a new context preset
+
+        Creates a new context preset with transcription context information.
+        Context presets can be used to improve transcription accuracy across
+        multiple meetings by providing domain-specific terminology and translations.
+
+        Context fields (all optional):
+        - domain: Industry/field (e.g., "medical", "legal", "technology")
+        - topic: Specific meeting subject
+        - text: Additional context information
+        - terms: Array of custom terminology and jargon
+        - translation_terms: Array of specific term translations
+      parameters: []
+      responses:
+        '201':
+          description: Created context preset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.ContextPreset'
+        '403':
+          description: Created context preset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: Created context preset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Context Presets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Models.CreateContextPresetRequest'
+        description: Context preset creation request
+  /api/v1/context-presets/{presetId}:
+    get:
+      operationId: ContextPresetOperations_getContextPreset
+      summary: Get context preset details
+      description: |-
+        Get context preset details
+
+        Retrieves detailed information about a specific context preset.
+      parameters:
+        - name: presetId
+          in: path
+          required: true
+          description: Context preset ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Context preset details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.ContextPreset'
+        '403':
+          description: Context preset details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Context Presets
+    put:
+      operationId: ContextPresetOperations_updateContextPreset
+      summary: Update context preset
+      description: |-
+        Update context preset
+
+        Updates an existing context preset with new information.
+        All context fields are optional and will replace existing values.
+      parameters:
+        - name: presetId
+          in: path
+          required: true
+          description: Context preset ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Updated context preset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.ContextPreset'
+        '403':
+          description: Updated context preset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: Updated context preset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Context Presets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Models.UpdateContextPresetRequest'
+        description: Context preset update request
+    delete:
+      operationId: ContextPresetOperations_deleteContextPreset
+      summary: Delete context preset
+      description: |-
+        Delete context preset
+
+        Permanently deletes a context preset. This action cannot be undone.
+      parameters:
+        - name: presetId
+          in: path
+          required: true
+          description: Context preset ID (sqid)
+          schema:
+            type: string
+      responses:
+        '204':
+          description: No content on success
+        '403':
+          description: No content on success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Context Presets
+  /api/v1/conversations:
+    post:
+      operationId: ConversationAPIOperations_createConversation
+      summary: Create conversation
+      description: |-
+        Create conversation
+
+        Creates a short-lived conversation descriptor for the authenticated user.
+        The descriptor stores languages, topic-derived transcription context, and
+        two-way translation mode. The WebSocket start action later references this
+        descriptor by id.
+
+        The returned `id` must be sent in the `start_conversation` WebSocket
+        action payload and used for Socket.IO channels:
+        - `conversation.{id}` for `conversation.started` and `conversation.paused`
+        - `conversation.transcription.{id}` for `transcription.created`
+        - `conversation.translation.{id}` for `translation.created`
+      parameters: []
+      responses:
+        '200':
+          description: New conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationResponse'
+        '403':
+          description: New conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: New conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConversationRequest'
+        description: Conversation configuration
+  /api/v1/conversations/{conversationId}:
+    put:
+      operationId: ConversationAPIOperations_updateConversation
+      summary: Update conversation
+      description: |-
+        Update conversation
+
+        Updates a short-lived conversation descriptor before or during a live
+        conversation session. The WebSocket `start_conversation` action and
+        subsequent reconnects load the latest cached descriptor by id.
+
+        If `topic` is omitted, the previous topic and topic-derived transcription
+        context are preserved. If `topic` is null, the topic context is cleared.
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: Conversation ID (UUID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Updated conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationResponse'
+        '400':
+          description: Updated conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+        '403':
+          description: Updated conversation descriptor
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/AccessDeniedResponse'
+        '422':
+          description: Updated conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateConversationRequest'
+        description: Updated conversation configuration
+    delete:
+      operationId: ConversationAPIOperations_deleteConversation
+      summary: Delete conversation
+      description: |-
+        Delete conversation
+
+        Deletes the short-lived cached conversation descriptor. After deletion,
+        route binding, websocket start, live sharing, and broadcasting
+        authorization can no longer resolve the conversation id.
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: Conversation ID (UUID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The request has succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDeleteResponse'
+        '400':
+          description: The server could not understand the request due to invalid syntax.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+        '403':
+          description: Access is forbidden.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/AccessDeniedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
+  /api/v1/conversations/{conversationId}/ping:
+    post:
+      operationId: ConversationAPIOperations_pingConversation
+      summary: Ping conversation
+      description: |-
+        Ping conversation
+
+        Refreshes the short-lived cached conversation descriptor so route binding,
+        websocket start, live sharing, and broadcasting authorization can continue
+        to resolve the conversation.
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: Conversation ID (UUID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Success flag
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationPingResponse'
+        '400':
+          description: Success flag
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+        '403':
+          description: Success flag
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/AccessDeniedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
+  /api/v1/conversations/{conversationId}/qrcode:
+    get:
+      operationId: ConversationAPIOperations_getConversationQrCode
+      summary: Get conversation QR code
+      description: |-
+        Get conversation QR code
+
+        Generates a PNG QR code for the authenticated user's conversation URL.
+        The QR code encodes the conversation QR endpoint URL using the conversation UUID.
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: Conversation ID (UUID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: PNG image bytes
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: PNG image bytes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+        '403':
+          description: PNG image bytes
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/AccessDeniedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
+  /api/v1/conversations/{conversationId}/share:
+    get:
+      operationId: ConversationAPIOperations_getShareConversation
+      summary: Get shared conversation view
+      description: |-
+        Get shared conversation view
+
+        Retrieves the shared conversation descriptor for live share viewers.
+        Access requires either an authenticated owner session or a valid bearer
+        share token for the same conversation id.
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: Conversation ID (UUID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Shared conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationResponse'
+        '403':
+          description: Shared conversation descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
+  /api/v1/conversations/{conversationId}/share-token:
+    post:
+      operationId: ConversationAPIOperations_getConversationShareToken
+      summary: Get conversation live share token
+      description: |-
+        Get conversation live share token
+
+        Generates a JWT token for live sharing access to a conversation.
+        This token can authorize:
+        - `GET /api/v1/conversations/{id}/share`
+        - Socket.IO private channels for the same conversation id
+
+        The endpoint checks the owner's live sharing concurrency limit.
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: Conversation ID (UUID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: JWT token for conversation live sharing access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationShareTokenResponse'
+        '400':
+          description: JWT token for conversation live sharing access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
+  /api/v1/credits/usage:
+    get:
+      operationId: CreditOperations_getUsage
+      summary: Get credit usage
+      description: |-
+        Get credit usage
+
+        Retrieves the authenticated user's credit usage information,
+        including total allocated minutes, available minutes, and used minutes.
+
+        Credits are consumed during meeting transcription and translation.
+        Credits are allocated through:
+        - Active subscription plans (included minutes)
+        - Additional credit purchases
+      parameters: []
+      responses:
+        '200':
+          description: Current credit usage statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.CreditUsage'
+        '403':
+          description: Current credit usage statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Credits
+  /api/v1/general:
+    get:
+      operationId: General_getGeneralInfo
+      summary: Get general system information
+      description: |-
+        Get general system information
+
+        Returns general information about the system including
+        supported languages for transcription and translation,
+        available conversation topic categories, and real-time
+        connection domains. Domain lists include active database-configured
+        domains, ordered by their configured priority.
+        This endpoint does not require authentication.
+      parameters: []
+      responses:
+        '200':
+          description: General system information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  languages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Models.Language'
+                    x-typespec-name: Models.Language[]
+                    description: Array of supported language codes for transcription and translation
+                  conversation_topics:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Models.ConversationTopic'
+                    x-typespec-name: Models.ConversationTopic[]
+                    description: Array of available conversation topic category keys
+                  websocket_domains:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GeneralDomain'
+                    x-typespec-name: GeneralDomain[]
+                    description: Array of active native WebSocket domains with priority, ordered by configured priority
+                  socketio_domains:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GeneralDomain'
+                    x-typespec-name: GeneralDomain[]
+                    description: Array of active Socket.IO domains with priority, ordered by configured priority
+                required:
+                  - languages
+                  - conversation_topics
+                  - websocket_domains
+                  - socketio_domains
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - General
+  /api/v1/meetings:
+    get:
+      operationId: MeetingOperations_getMeetings
+      summary: List meetings
+      description: |-
+        List user's meetings
+
+        Retrieves a paginated list of meetings for the authenticated user.
+        Supports filtering by meeting status.
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: 'Page number for pagination (default: 1)'
+          schema:
+            type: integer
+            format: int32
+          explode: false
+        - name: status
+          in: query
+          required: false
+          description: Optional status filter
+          schema:
+            $ref: '#/components/schemas/Models.MeetingStatus'
+          explode: false
+      responses:
+        '200':
+          description: Paginated list of meetings
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                  - meta
+                  - links
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Models.Meeting'
+                    x-typespec-name: Models.Meeting[]
+                    description: Array of items
+                  meta:
+                    allOf:
+                      - $ref: '#/components/schemas/PaginationMeta'
+                    description: Pagination metadata
+                  links:
+                    type: object
+                    properties:
+                      first:
+                        type: string
+                      last:
+                        type: string
+                      next:
+                        type: string
+                        nullable: true
+                      prev:
+                        type: string
+                        nullable: true
+                    required:
+                      - first
+                      - last
+                      - next
+                      - prev
+                    description: Pagination links
+                description: Paginated response wrapper
+                x-typespec-name: PaginatedResponse<Models.Meeting>
+        '403':
+          description: Paginated list of meetings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+    post:
+      operationId: MeetingOperations_createMeeting
+      summary: Create meeting
+      description: |-
+        Create a new meeting
+
+        Creates a new meeting with specified language configuration and optional context.
+        Context information improves transcription accuracy for domain-specific terminology.
+
+        Context options:
+        - Use 'context_preset_id' to load a saved context preset (recommended for recurring meetings)
+        - Use 'context' to provide inline context data
+        - If both are provided, 'context_preset_id' takes priority
+
+        Language requirements:
+        - Source and target languages must be different
+        - At least source and target must be specified
+
+        Two-way translation:
+        - When enabled, translations occur in both directions (source to target and target to source)
+        - Useful for bilingual meetings where both parties need translations
+      parameters: []
+      responses:
+        '201':
+          description: Created meeting details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.DetailedMeeting'
+        '403':
+          description: Created meeting details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: Created meeting details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Models.CreateMeetingRequest'
+        description: Meeting creation request
+  /api/v1/meetings/{meetingId}:
+    get:
+      operationId: MeetingOperations_getMeeting
+      summary: Get meeting details
+      description: |-
+        Get meeting details
+
+        Retrieves detailed information about a specific meeting,
+        including full context and metadata.
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Detailed meeting information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.DetailedMeeting'
+        '403':
+          description: Detailed meeting information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+    put:
+      operationId: MeetingOperations_updateMeeting
+      summary: Update meeting
+      description: |-
+        Update meeting
+
+        Updates meeting properties. Only the meeting owner can update.
+        Cannot update completed meetings.
+
+        Context options:
+        - Use 'context_preset_id' to load a saved context preset
+        - Use 'context' to provide inline context data
+        - If both are provided, 'context_preset_id' takes priority
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Updated meeting details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.DetailedMeeting'
+        '403':
+          description: Updated meeting details
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Updated meeting details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Models.UpdateMeetingRequest'
+        description: Meeting update request
+    delete:
+      operationId: MeetingOperations_deleteMeeting
+      summary: Delete meeting
+      description: |-
+        Delete meeting
+
+        Permanently deletes a meeting and all associated transcriptions and translations.
+        Only the meeting owner can delete.
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '204':
+          description: No content on success
+        '403':
+          description: No content on success
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/complete:
+    post:
+      operationId: MeetingOperations_completeMeeting
+      summary: Complete meeting
+      description: |-
+        Complete a meeting
+
+        Marks an active meeting as completed. This transitions the meeting status to 'completed'
+        and records the end timestamp. Once completed, a meeting cannot be modified or receive
+        new transcriptions/translations until it is resumed.
+
+        What happens when completing:
+        - Meeting status is changed to 'completed'
+        - End timestamp (ended_at) is recorded
+        - MeetingCompleted event is dispatched
+        - All existing transcriptions and translations are preserved
+        - Meeting becomes read-only (cannot receive new data)
+
+        Requirements:
+        - Meeting must NOT already be in 'completed' status
+        - Only the meeting owner can complete the meeting
+        - Typically used to mark the end of a meeting session
+
+        After completion:
+        - Use the resume endpoint to reuse the meeting for a new session
+        - Transcriptions and translations remain accessible for viewing
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Updated meeting details with completed status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.DetailedMeeting'
+        '400':
+          description: Updated meeting details with completed status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Updated meeting details with completed status
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/qrcode:
+    get:
+      operationId: MeetingOperations_getMeetingQrCode
+      summary: Get meeting QR code
+      description: |-
+        Get meeting QR code
+
+        Generates a PNG QR code for the authenticated user's meeting URL.
+        The QR code encodes the meeting QR endpoint URL using the public meeting sqid.
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: PNG image bytes
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '403':
+          description: PNG image bytes
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/resume:
+    post:
+      operationId: MeetingOperations_resumeMeeting
+      summary: Resume completed meeting
+      description: |-
+        Resume a completed meeting
+
+        Resumes a completed meeting by resetting it to ready status and clearing all
+        transcription and translation data. This allows the meeting to be used again
+        for a new session.
+
+        What happens when resuming:
+        - Meeting status is reset to 'ready'
+        - All transcriptions are permanently deleted
+        - All translations are permanently deleted
+        - Metadata counters (transcriptionCount, translationCount) are reset to 0
+        - Snapshot timestamp is cleared
+        - Meeting configuration (title, languages, context) is preserved
+
+        Requirements:
+        - Meeting must be in 'completed' status
+        - Only the meeting owner can resume
+        - Cannot resume meetings in other states (ready, in_progress, paused)
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Updated meeting details with ready status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.DetailedMeeting'
+        '400':
+          description: Updated meeting details with ready status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Updated meeting details with ready status
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/share:
+    get:
+      operationId: MeetingOperations_getShareMeeting
+      summary: Get shared meeting view
+      description: |-
+        Get shared meeting view
+
+        Retrieves a public-facing view of a meeting for live share viewers.
+        This endpoint uses the `auth.share` middleware — access requires a valid
+        JWT share token obtained from the `/meetings/{id}/share-token` endpoint.
+
+        The response is a reduced meeting object containing only the fields
+        relevant to a viewer (no owner-only metadata or context).
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Shared meeting details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.ShareMeeting'
+        '403':
+          description: Shared meeting details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/share-token:
+    post:
+      operationId: MeetingOperations_getShareToken
+      summary: Get live share token
+      description: |-
+        Get live share token
+
+        Generates a JWT token for live sharing access to a meeting.
+        This token allows others to view the meeting in real-time.
+
+        Live sharing features:
+        - Requires active subscription with live sharing enabled
+        - Subject to concurrency limits based on user's plan
+        - Token is valid for the duration of the meeting
+
+        The endpoint checks:
+        - User's current plan has live sharing enabled
+        - Current active viewers doesn't exceed max concurrency limit
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: JWT token for live sharing access
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: JWT token for live sharing authentication
+                required:
+                  - token
+        '403':
+          description: JWT token for live sharing access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/summarize:
+    post:
+      operationId: MeetingOperations_generateSummary
+      summary: Generate meeting summary
+      description: |-
+        Generate meeting summary
+
+        Generates an AI-powered summary of the meeting transcriptions.
+        The summary is streamed in real-time as it's generated and saved
+        to the meeting record once complete.
+
+        Summary generation process:
+        - Fetches all transcriptions from the meeting
+        - Uses the meeting's target language for the summary
+        - Streams the summary content as it's generated
+        - Saves the complete summary to the meeting once generation is complete
+
+        Requirements:
+        - Meeting must be in 'completed' status
+        - Meeting must have transcriptions available
+        - Summary must not have been generated previously
+        - Only the meeting owner can generate summaries
+
+        Concurrency control:
+        - Uses cache locks to prevent concurrent summary generation
+        - Lock expires after 30 seconds
+        - Returns error if summary generation is already in progress
+
+        Error scenarios:
+        - Meeting not completed: Returns 400 with 'meeting_not_completed_for_summary'
+        - Summary already generated: Returns 400 with 'summary_already_generated'
+        - No transcriptions found: Returns 400 with 'summary_generation_failed'
+        - Generation in progress: Returns 400 with 'summary_generation_in_progress'
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Streamed summary content
+          content:
+            text/plain:
+              schema:
+                type: string
+        '400':
+          description: Streamed summary content
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Streamed summary content
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/transcriptions:
+    get:
+      operationId: MeetingOperations_getMeetingTranscriptions
+      summary: Get meeting transcriptions
+      description: |-
+        Get meeting transcriptions
+
+        Retrieves transcriptions for a specific meeting with cursor-based pagination.
+        Transcriptions are returned in sequence order and can be fetched in ascending
+        or descending order.
+
+        Pagination:
+        - Uses cursor-based pagination with sequence keys
+        - Default limit is 100, maximum is 200
+        - Results are ordered by sequence number (descending by default)
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+        - name: sequence
+          in: query
+          required: false
+          description: Optional sequence cursor for pagination
+          schema:
+            type: string
+          explode: false
+        - name: limit
+          in: query
+          required: false
+          description: 'Number of transcriptions to return (1-200, default: 100)'
+          schema:
+            type: integer
+            format: int32
+          explode: false
+        - name: descendent
+          in: query
+          required: false
+          description: Sort order - true for descending (newest first), false for ascending
+          schema:
+            type: boolean
+          explode: false
+      responses:
+        '200':
+          description: List of transcriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Models.TranscriptionData'
+                x-typespec-name: Models.TranscriptionData[]
+        '403':
+          description: List of transcriptions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/translations:
+    get:
+      operationId: MeetingOperations_getMeetingTranslations
+      summary: Get meeting translations
+      description: |-
+        Get meeting translations
+
+        Retrieves translations for a specific meeting with cursor-based pagination.
+        Translations are returned in sequence order and can be fetched in ascending
+        or descending order.
+
+        Pagination:
+        - Uses cursor-based pagination with sequence keys
+        - Default limit is 100, maximum is 200
+        - Results are ordered by sequence number (descending by default)
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+        - name: sequence
+          in: query
+          required: false
+          description: Optional sequence cursor for pagination
+          schema:
+            type: string
+          explode: false
+        - name: limit
+          in: query
+          required: false
+          description: 'Number of translations to return (1-200, default: 100)'
+          schema:
+            type: integer
+            format: int32
+          explode: false
+        - name: descendent
+          in: query
+          required: false
+          description: Sort order - true for descending (newest first), false for ascending
+          schema:
+            type: boolean
+          explode: false
+      responses:
+        '200':
+          description: List of translations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Models.TranslationData'
+                x-typespec-name: Models.TranslationData[]
+        '403':
+          description: List of translations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/orders:
+    get:
+      operationId: OrderOperations_getOrders
+      summary: List orders
+      description: |-
+        List user's orders
+
+        Retrieves a paginated list of orders for the authenticated user.
+        Supports filtering by order status.
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: 'Page number for pagination (default: 1)'
+          schema:
+            type: integer
+            format: int32
+          explode: false
+        - name: status
+          in: query
+          required: false
+          description: Optional status filter
+          schema:
+            $ref: '#/components/schemas/Models.OrderStatus'
+          explode: false
+      responses:
+        '200':
+          description: Paginated list of orders
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                  - meta
+                  - links
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Models.Order'
+                    x-typespec-name: Models.Order[]
+                    description: Array of items
+                  meta:
+                    allOf:
+                      - $ref: '#/components/schemas/PaginationMeta'
+                    description: Pagination metadata
+                  links:
+                    type: object
+                    properties:
+                      first:
+                        type: string
+                      last:
+                        type: string
+                      next:
+                        type: string
+                        nullable: true
+                      prev:
+                        type: string
+                        nullable: true
+                    required:
+                      - first
+                      - last
+                      - next
+                      - prev
+                    description: Pagination links
+                description: Paginated response wrapper
+                x-typespec-name: PaginatedResponse<Models.Order>
+        '403':
+          description: Paginated list of orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Orders
+    post:
+      operationId: OrderOperations_createOrder
+      summary: Create subscription order
+      description: |-
+        Create a new subscription order
+
+        Creates a new order for a subscription plan. This endpoint is used exclusively
+        for subscription plan purchases. For purchasing additional credits, use the
+        POST /orders/credit endpoint instead.
+
+        Requirements:
+        - plan_id is required and must be a valid active plan (sqid)
+        - Plan must not be a trial plan
+        - redirect_path (optional) must be a relative path without URL scheme
+
+        Process flow:
+        1. Validates plan_id using SQID encoding
+        2. Verifies plan is active and not a trial plan
+        3. Creates order record with plan association
+        4. Initializes payment via payment gateway (Stripe)
+        5. Returns order with payment URL in metadata
+
+        Payment completion:
+        - User completes payment on gateway's checkout page
+        - Gateway sends webhook to /payments/stripe/callback
+        - System processes payment and activates subscription plan
+        - Plan's included minutes are added to user account
+
+        Redirect behavior:
+        - If redirect_path is provided, converts it to full URL (e.g., "/dashboard" -> "https://app.example.com/dashboard")
+        - After successful payment, user is redirected to the specified URL instead of default success page
+        - redirect_path must be a relative path (e.g., "/dashboard/billing")
+        - Full URLs with schemes (http://, https://) are rejected by validation
+      parameters: []
+      responses:
+        '201':
+          description: Created order with payment information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.Order'
+        '403':
+          description: Created order with payment information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: Created order with payment information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Orders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Models.CreateOrderRequest'
+        description: Order creation request (requires plan_id, optional redirect_path)
+  /api/v1/orders/available-subscription:
+    get:
+      operationId: OrderOperations_getAvailableSubscriptionOrder
+      summary: Get available subscription order
+      description: |-
+        Get current available subscription order
+
+        Retrieves the user's most recent completed subscription order.
+        This endpoint is useful for determining the user's current active subscription
+        and accessing subscription management features.
+
+        The endpoint returns:
+        - The latest completed order for a subscription plan (orderable_type = Plan)
+        - Null if the user has no completed subscription orders
+
+        Use cases:
+        - Check if user has an active subscription
+        - Get subscription order details for portal access
+        - Display current subscription information in UI
+        - Determine eligibility for subscription management features
+      parameters: []
+      responses:
+        '200':
+          description: The most recent completed subscription order or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.Order'
+        '403':
+          description: The most recent completed subscription order or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Orders
+  /api/v1/orders/credit:
+    post:
+      operationId: OrderOperations_chargeCredit
+      summary: Charge additional credits
+      description: |-
+        Charge additional credits
+
+        Creates a new order for purchasing additional credit hours.
+        This endpoint allows users with active non-trial plans to buy extra credits
+        for overage usage beyond their plan's included minutes.
+
+        Requirements:
+        - User must have an active subscription plan
+        - Plan must not be a trial plan (is_trial = false)
+        - Quantity must be between 1 and 100 (credit hours)
+        - redirect_path (optional) must be a relative path without URL scheme
+
+        Process flow:
+        1. Validates user has a valid non-trial plan
+        2. Creates order with orderable_type = null (credit-only order)
+        3. Calculates amount based on plan's hourly price or default rate
+        4. Initializes payment via payment gateway (Stripe)
+        5. Returns order with payment URL in metadata
+
+        Payment completion:
+        - User completes payment on gateway's checkout page
+        - Gateway sends webhook to /payments/stripe/callback
+        - System processes payment and adds credit duration to user account
+        - Credits are immediately available for use
+
+        Credit calculation:
+        - Each quantity unit = 1 hour (60 minutes) of credit
+        - Price per hour is determined by user's current plan configuration
+        - Total amount = quantity * hourly_price
+
+        Redirect behavior:
+        - If redirect_path is provided, converts it to full URL (e.g., "/dashboard/credits" -> "https://app.example.com/dashboard/credits")
+        - After successful payment, user is redirected to the specified URL instead of default success page
+        - redirect_path must be a relative path (e.g., "/dashboard/credits")
+        - Full URLs with schemes (http://, https://) are rejected by validation
+      parameters: []
+      responses:
+        '201':
+          description: Created credit order with payment information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.Order'
+        '400':
+          description: Created credit order with payment information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Created credit order with payment information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: Created credit order with payment information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Orders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Models.ChargeCreditRequest'
+        description: Credit charge request with quantity and optional redirect_path
+  /api/v1/orders/{orderId}:
+    get:
+      operationId: OrderOperations_getOrder
+      summary: Get order details
+      description: |-
+        Get order details
+
+        Retrieves detailed information about a specific order.
+        Only the order owner can view their order details.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: Order ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Order details with related plan information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.Order'
+        '403':
+          description: Order details with related plan information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Orders
+  /api/v1/orders/{orderId}/cancel:
+    post:
+      operationId: OrderOperations_cancelOrder
+      summary: Cancel order
+      description: |-
+        Cancel order
+
+        Cancels a pending order. Only orders in 'pending' status can be canceled.
+        Only the order owner can cancel their orders.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: Order ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Canceled order details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.Order'
+        '403':
+          description: Canceled order details
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Canceled order details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Orders
+  /api/v1/orders/{orderId}/portal:
+    post:
+      operationId: OrderOperations_getSubscriptionPortalUrl
+      summary: Get subscription portal URL
+      description: |-
+        Get subscription portal URL
+
+        Retrieves a URL to the payment gateway's subscription management portal
+        for managing a completed subscription order. Users can use this portal to:
+        - Update payment methods
+        - View billing history
+        - Cancel or modify subscriptions
+        - Download invoices
+
+        Validations:
+        - Order must be in 'completed' status
+        - Order must be for a subscription plan (not one-time credits)
+        - Must be the user's latest completed subscription order
+        - Only the order owner can access the portal
+
+        The portal URL is generated by the payment gateway (Stripe or Creem) using
+        the customer ID stored in the order's subscription_result metadata.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: Order ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Portal URL for subscription management
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    description: Payment gateway portal URL for subscription management
+                required:
+                  - url
+        '403':
+          description: Portal URL for subscription management
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: Portal URL for subscription management
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Orders
+  /api/v1/payments/stripe/callback:
+    post:
+      operationId: PaymentOperations_stripeCallback
+      summary: Stripe payment webhook
+      description: |-
+        Stripe payment callback webhook
+
+        Webhook endpoint for Stripe to notify successful payments.
+        This endpoint should be registered in Stripe dashboard.
+
+        Process flow:
+        1. Receives session_id from Stripe
+        2. Retrieves payment details from Stripe API
+        3. Validates payment status
+        4. Updates order status to 'completed'
+        5. Activates plan subscription (if applicable)
+        6. Adds credit duration to user account
+        7. Emits PaymentSucceeded and OrderCompleted events
+      parameters: []
+      responses:
+        '200':
+          description: Success status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '422':
+          description: Success status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Payments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Models.StripeCallbackRequest'
+        description: Stripe callback with session ID
+  /api/v1/plans:
+    get:
+      operationId: PlanOperations_getPlans
+      summary: List available plans
+      description: |-
+        List available plans
+
+        Retrieves all active subscription plans available for purchase.
+        Response is cached for 600 seconds (10 minutes).
+
+        Each plan includes:
+        - Base price for the subscription period
+        - Included minutes per period
+        - Hourly rate for additional minutes
+        - Plan duration in days
+      parameters: []
+      responses:
+        '200':
+          description: List of available plans
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Models.Plan'
+                x-typespec-name: Models.Plan[]
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Plans
+  /api/v1/users/config:
+    get:
+      operationId: UserAPIOperations_getUserConfig
+      summary: Get current user config
+      description: |-
+        Get current user config
+
+        Returns the authenticated user's configurable preferences.
+      parameters: []
+      responses:
+        '200':
+          description: User config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.UserConfig'
+        '403':
+          description: User config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Users
+    put:
+      operationId: UserAPIOperations_updateUserConfig
+      summary: Update current user config
+      description: |-
+        Update current user config
+
+        Updates the authenticated user's configurable preferences.
+      parameters: []
+      responses:
+        '200':
+          description: Updated user config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Models.UserConfig'
+        '403':
+          description: Updated user config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnauthenticatedResponse'
+        '422':
+          description: Updated user config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserConfigRequest'
+  /api/v1/waitlist:
+    post:
+      operationId: WaitlistOperations_joinWaitlist
+      summary: Join the waitlist
+      description: |-
+        Join the waitlist
+
+        Submits a request to join the product waitlist. Collects user information
+        including name, email, optional company, and use case. The user's IP address
+        is automatically captured for analytics purposes.
+      parameters: []
+      responses:
+        '200':
+          description: Success response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '422':
+          description: Success response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Waitlist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JoinWaitlistRequest'
+  /api/web/auth/callback:
+    get:
+      operationId: WebAuthOperations_handleCallback
+      summary: Handle OAuth callback
+      description: |-
+        Handle OAuth provider callback
+
+        Processes OAuth callback from provider, creates or updates user,
+        and sets authentication cookie.
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: Authorization code from provider
+          schema:
+            type: string
+          explode: false
+        - name: state
+          in: query
+          required: false
+          description: State parameter for CSRF protection
+          schema:
+            type: string
+          explode: false
+      responses:
+        '302':
+          description: Redirect to application with auth cookie set
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: true
+              schema:
+                type: string
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Web Authentication
+  /api/web/auth/demo:
+    get:
+      operationId: WebAuthOperations_demoAuth
+      summary: Demo authentication (dev only)
+      description: 'WARNING: Remove in production'
+      parameters: []
+      responses:
+        '302':
+          description: Redirect with demo auth cookie
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: true
+              schema:
+                type: string
+      tags:
+        - Web Authentication
+  /api/web/auth/login-token:
+    get:
+      operationId: WebAuthOperations_loginByToken
+      summary: Set auth cookie from login token
+      description: |-
+        Convert a JWT token URL into an auth cookie
+
+        Accepts a valid JWT token in the query string, authenticates it using the
+        web auth guard, sets the same token as the HTTP-only auth_token cookie,
+        and redirects back to the frontend.
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: JWT authentication token
+          schema:
+            type: string
+          explode: false
+      responses:
+        '302':
+          description: Redirect to application with auth cookie set
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: true
+              schema:
+                type: string
+        '401':
+          description: Redirect to application with auth cookie set
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Web Authentication
+  /api/web/auth/redirect:
+    get:
+      operationId: WebAuthOperations_redirectToProvider
+      summary: Initiate OAuth authentication
+      description: |-
+        Redirect to OAuth provider
+
+        Initiates OAuth authentication flow with the specified provider (Google).
+        Redirects user to provider's consent page.
+      parameters:
+        - name: provider
+          in: query
+          required: true
+          description: OAuth provider (currently only 'google' is supported)
+          schema:
+            $ref: '#/components/schemas/Models.OauthProvider'
+          explode: false
+      responses:
+        '302':
+          description: Redirect to provider
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Web Authentication
+components:
+  schemas:
+    AccessDeniedResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          enum:
+            - Access denied.
+          description: Error message
+      description: |-
+        Access denied error response (403)
+        Returned when user doesn't have permission to access a resource
+    AuthCookie:
+      type: object
+      description: JWT Cookie-based authentication
+    BroadcastingAuthRequest:
+      type: object
+      required:
+        - room
+      properties:
+        room:
+          type: string
+          description: Room name to authenticate for (can include or exclude prefix)
+        prefix:
+          type: string
+          enum:
+            - private-
+            - presence-
+          description: Optional channel prefix (defaults to 'private-')
+      description: Broadcasting authentication request
+    BroadcastingAuthResponse:
+      type: object
+      required:
+        - token
+        - room_name
+      properties:
+        token:
+          type: string
+          description: JWT token for WebSocket authentication
+        room_name:
+          type: string
+          description: Full room name with prefix (e.g., 'private-meeting.123')
+      description: Broadcasting authentication response
+    CommandRequest:
+      type: object
+      required:
+        - action
+        - target_id
+      properties:
+        action:
+          allOf:
+            - $ref: '#/components/schemas/Models.CommandAction'
+          description: Command action to broadcast to the authenticated user's command channel
+        target_id:
+          type: string
+          description: Target resource id. Use a meeting sqid for meeting actions and a conversation UUID for conversation actions.
+      description: Command request body
+    ConversationDeleteResponse:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          description: Whether the cached conversation descriptor was deleted
+      description: Conversation delete response
+    ConversationPingResponse:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          description: Whether the ping refreshed the cached conversation descriptor
+      description: Conversation ping response
+    ConversationResponse:
+      type: object
+      required:
+        - id
+        - user_id
+        - languages
+        - topic
+        - two_way_translation
+      properties:
+        id:
+          type: string
+          description: Conversation ID (UUID)
+        user_id:
+          type: string
+          description: Sqid-encoded owner user ID
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.ConversationLanguages'
+          description: Language configuration used by the WebSocket transcription connection
+        topic:
+          allOf:
+            - $ref: '#/components/schemas/Models.ConversationTopic'
+          nullable: true
+          description: Selected topic key, or null when no topic is configured
+        two_way_translation:
+          type: boolean
+          description: Whether two-way translation is enabled
+      description: Conversation descriptor response
+    ConversationShareTokenResponse:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: JWT token for conversation live sharing authentication
+      description: Conversation live share token response
+    CreateConversationRequest:
+      type: object
+      required:
+        - languages
+      properties:
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.ConversationLanguages'
+          description: Language configuration used by the WebSocket transcription connection
+        topic:
+          allOf:
+            - $ref: '#/components/schemas/Models.ConversationTopic'
+          nullable: true
+          description: Optional topic key returned by GET /api/v1/general, e.g. Traveling or BusinessMeeting
+        two_way_translation:
+          type: boolean
+          description: Enable two-way translation (translates in both configured directions)
+      description: Request to create a short-lived conversation descriptor
+    ErrorResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: Error message
+        code:
+          type: string
+          description: Error code
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+            x-typespec-name: string[]
+          x-typespec-name: Record<string[]>
+          description: Validation errors
+      description: Common error response structure
+    ExceptionResponse:
+      type: object
+      required:
+        - message
+        - exception
+      properties:
+        message:
+          type: string
+          description: Error message describing what went wrong
+        exception:
+          type: string
+          description: Exception class name
+      description: |-
+        Exception error response
+        Returned when a general exception occurs
+    GeneralDomain:
+      type: object
+      required:
+        - domain
+        - priority
+      properties:
+        domain:
+          type: string
+          description: Domain hostname
+        priority:
+          type: integer
+          format: int32
+          description: Configured domain priority; lower values are returned first
+    JoinWaitlistRequest:
+      type: object
+      required:
+        - name
+        - email
+      properties:
+        name:
+          type: string
+          description: Full name of the person joining the waitlist
+        email:
+          type: string
+          description: Email address
+        company:
+          type: string
+          description: Company name (optional)
+        use_case:
+          type: string
+          maxLength: 100
+          description: Use case description (max 100 characters, optional)
+      description: Waitlist join request
+    Models.BillingCycle:
+      type: string
+      enum:
+        - one_time
+        - month
+        - year
+      description: |-
+        Billing cycle options for subscription plans
+
+        Defines how frequently a plan is billed
+        PHP Class: Modules\Payment\Enums\BillingCycle
+    Models.ChargeCreditRequest:
+      type: object
+      required:
+        - quantity
+      properties:
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: Number of credit hours to purchase (1 quantity = 60 minutes)
+        redirect_path:
+          type: string
+          description: |-
+            Optional redirect path after payment completion.
+            Must be a relative path without URL scheme (e.g., '/dashboard/credits').
+            Full URLs with schemes (http://, https://) are rejected.
+            After successful payment, the user will be redirected to this path instead of the default success page.
+      description: Request to charge additional credits
+    Models.CommandAction:
+      type: string
+      enum:
+        - goto_meeting
+        - goto_conversation
+        - start_meeting
+        - pause_meeting
+        - start_conversation
+        - pause_conversation
+      description: |-
+        Cross-device command actions
+
+        Used by POST /api/v1/commands to broadcast control requests to the
+        authenticated user's command channel.
+        PHP Class: App\Enums\CommandAction
+    Models.ContextPreset:
+      type: object
+      required:
+        - id
+        - name
+        - context
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Context preset ID (sqid)
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Preset name
+        context:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Models.TranscriptionContext'
+          nullable: true
+          description: Transcription context configuration
+        created_at:
+          type: integer
+          format: int64
+          description: Creation timestamp (Unix timestamp in seconds)
+        updated_at:
+          type: integer
+          format: int64
+          description: Last update timestamp (Unix timestamp in seconds)
+      description: |-
+        Context preset model
+
+        Represents a saved transcription context configuration that can be
+        reused across multiple meetings to improve transcription accuracy.
+    Models.ConversationLanguages:
+      type: object
+      required:
+        - source
+        - target
+      properties:
+        source:
+          allOf:
+            - $ref: '#/components/schemas/Models.Language'
+          description: Primary source language for transcription (see Language enum)
+        target:
+          allOf:
+            - $ref: '#/components/schemas/Models.Language'
+          description: Target language for translation (must be different from source, see Language enum)
+        hints:
+          type: array
+          items:
+            $ref: '#/components/schemas/Models.Language'
+          x-typespec-name: Models.Language[]
+          nullable: true
+          maxItems: 10
+          description: Additional language hints for better accuracy (see Language enum)
+        additions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Models.Language'
+          x-typespec-name: Models.Language[]
+          nullable: true
+          maxItems: 10
+          description: Additional languages to support (see Language enum)
+      description: |-
+        Language configuration for short-lived conversations
+
+        PHP Class: Modules\Conversation\Data\ConversationLanguages
+        Note: Language enums are serialized as strings (e.g., "en", "es", "zh-TW")
+    Models.ConversationTopic:
+      type: string
+      enum:
+        - Traveling
+        - Restaurant
+        - Accommodation
+        - Entertainment
+        - Shopping
+        - PersonalCare
+        - Transportation
+        - Immigration
+        - Medical
+        - Emergency
+        - Legal
+        - Banking
+        - Housing
+        - Social
+        - BusinessMeeting
+        - Exhibition
+        - JobInterview
+        - Education
+        - TechSupport
+      description: |-
+        Conversation topic categories
+
+        Used to categorize conversations for context-aware transcription
+        PHP Class: Modules\Conversation\Enums\ConversationTopic
+
+        Endpoints:
+        - GET /api/v1/general (returns array of all available topic keys)
+    Models.CreateContextPresetRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Preset name
+        context:
+          allOf:
+            - $ref: '#/components/schemas/Models.TranscriptionContext'
+          description: Optional transcription context
+      description: Create context preset request
+    Models.CreateMeetingRequest:
+      type: object
+      required:
+        - title
+        - languages
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 50
+          description: Meeting title
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingLanguages'
+          description: Language configuration
+        context_preset_id:
+          type: string
+          description: Optional context preset ID (sqid) to load saved transcription context. Takes priority over the 'context' field if both are provided.
+        context:
+          allOf:
+            - $ref: '#/components/schemas/Models.TranscriptionContext'
+          description: Optional transcription context for improved accuracy. Ignored if 'context_preset_id' is provided.
+        two_way_translation:
+          type: boolean
+          description: Enable two-way translation (translates from target back to source)
+      description: Request to create a new meeting
+    Models.CreateOrderRequest:
+      type: object
+      required:
+        - plan_id
+      properties:
+        plan_id:
+          type: string
+          description: Plan ID to purchase (sqid) - Required
+        redirect_path:
+          type: string
+          description: |-
+            Optional redirect path after payment completion.
+            Must be a relative path without URL scheme (e.g., '/dashboard/billing').
+            Full URLs with schemes (http://, https://) are rejected.
+            After successful payment, the user will be redirected to this path instead of the default success page.
+      description: |-
+        Request to create a new subscription order
+
+        This request is used exclusively for creating subscription plan orders.
+        For purchasing additional credits, use the ChargeCreditRequest model
+        with the POST /orders/credit endpoint.
+    Models.CreditUsage:
+      type: object
+      required:
+        - total
+        - available
+        - used
+      properties:
+        total:
+          type: integer
+          format: int32
+          description: Total allocated minutes
+        available:
+          type: integer
+          format: int32
+          description: Available remaining minutes
+        used:
+          type: integer
+          format: int32
+          description: Used minutes
+      description: Credit usage information
+    Models.Currency:
+      type: string
+      enum:
+        - USD
+      description: |-
+        Supported currencies
+
+        PHP Class: Modules\Payment\Enums\Currency
+    Models.DetailedMeeting:
+      type: object
+      required:
+        - id
+        - title
+        - status
+        - languages
+        - context
+        - summary
+        - metadata
+        - duration
+        - started_at
+        - ended_at
+        - paused_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Meeting ID (sqid)
+        title:
+          type: string
+          description: Meeting title
+        status:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingStatus'
+          description: Current meeting status (see MeetingStatus enum)
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingLanguages'
+          description: Language configuration (MeetingLanguages data object)
+        context:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Models.TranscriptionContext'
+          nullable: true
+          description: Transcription context for accuracy (TranscriptionContext data object)
+        summary:
+          type: string
+          nullable: true
+          description: AI-generated meeting summary (null if not yet generated)
+        metadata:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingMetadata'
+          nullable: true
+          description: Meeting metadata (MeetingMetadata data object)
+        duration:
+          type: integer
+          format: int32
+          description: Meeting duration in seconds
+        started_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting start Unix timestamp (seconds since epoch, or null)
+        ended_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting end Unix timestamp (seconds since epoch, or null)
+        paused_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting pause Unix timestamp (seconds since epoch, or null)
+        created_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting creation Unix timestamp (seconds since epoch, or null)
+        updated_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Last update Unix timestamp (seconds since epoch, or null)
+      description: |-
+        Detailed meeting resource with full context
+
+        Resource class: App\Http\Resources\DetailedMeetingResource
+        Note: Enum values are serialized as strings, all timestamps are Unix timestamps (seconds since epoch)
+    Models.Language:
+      type: string
+      enum:
+        - af
+        - sq
+        - ar
+        - az
+        - eu
+        - be
+        - bn
+        - bs
+        - bg
+        - ca
+        - zh
+        - zh-TW
+        - cs
+        - da
+        - nl
+        - en
+        - et
+        - fi
+        - fr
+        - de
+        - el
+        - hi
+        - hu
+        - id
+        - it
+        - ja
+        - ko
+        - ms
+        - pl
+        - pt
+        - ro
+        - ru
+        - sk
+        - sl
+        - es
+        - sv
+        - th
+        - tr
+        - uk
+        - vi
+      description: |-
+        Supported languages for transcription and translation
+
+        Complete list of all languages supported by the Rozeta transcription
+        and translation service (34 languages total)
+        PHP Class: Modules\Transcribe\Enums\Language
+
+        Endpoints:
+        - GET /api/v1/general (returns array of all available languages)
+        - Used in Meeting model for source and target languages
+    Models.Meeting:
+      type: object
+      required:
+        - id
+        - title
+        - status
+        - languages
+        - has_summary
+        - metadata
+        - duration
+        - started_at
+        - ended_at
+        - paused_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Meeting ID (sqid)
+        title:
+          type: string
+          minLength: 3
+          maxLength: 50
+          description: Meeting title
+        status:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingStatus'
+          description: Current meeting status (see MeetingStatus enum)
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingLanguages'
+          description: Language configuration (MeetingLanguages data object)
+        has_summary:
+          type: boolean
+          description: Whether the meeting has a generated summary
+        metadata:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingMetadata'
+          nullable: true
+          description: Meeting metadata (MeetingMetadata data object)
+        duration:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Meeting duration in seconds
+        started_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting start Unix timestamp (seconds since epoch, or null)
+        ended_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting end Unix timestamp (seconds since epoch, or null)
+        paused_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting pause Unix timestamp (seconds since epoch, or null)
+        created_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting creation Unix timestamp (seconds since epoch, or null)
+        updated_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Last update Unix timestamp (seconds since epoch, or null)
+      description: |-
+        Meeting resource (list view)
+
+        Resource class: App\Http\Resources\MeetingResource
+        Note: Enum values are serialized as strings, all timestamps are Unix timestamps (seconds since epoch)
+    Models.MeetingLanguages:
+      type: object
+      required:
+        - source
+        - target
+      properties:
+        source:
+          allOf:
+            - $ref: '#/components/schemas/Models.Language'
+          description: Primary source language for transcription (see Language enum)
+        target:
+          allOf:
+            - $ref: '#/components/schemas/Models.Language'
+          description: Target language for translation (must be different from source, see Language enum)
+        hints:
+          type: array
+          items:
+            $ref: '#/components/schemas/Models.Language'
+          x-typespec-name: Models.Language[]
+          nullable: true
+          maxItems: 10
+          description: Additional language hints for better accuracy (see Language enum)
+        additions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Models.Language'
+          x-typespec-name: Models.Language[]
+          nullable: true
+          maxItems: 10
+          description: Additional languages to support (see Language enum)
+      description: |-
+        Language configuration for meeting
+
+        PHP Class: Modules\Meeting\Data\MeetingLanguages
+        Note: Language enums are serialized as strings (e.g., "en", "es", "zh-TW")
+    Models.MeetingMetadata:
+      type: object
+      required:
+        - two_way_translation
+        - transcription_count
+        - translation_count
+      properties:
+        two_way_translation:
+          type: boolean
+          description: Enable two-way translation (translates from target back to source)
+        snapshot_at:
+          type: string
+          nullable: true
+          description: Snapshot timestamp (ISO 8601 datetime string or null)
+        transcription_count:
+          type: integer
+          format: int32
+          description: Total number of transcriptions
+        translation_count:
+          type: integer
+          format: int32
+          description: Total number of translations
+      description: |-
+        Meeting metadata (runtime information)
+
+        PHP Class: Modules\Meeting\Data\MeetingMetadata
+    Models.MeetingStatus:
+      type: string
+      enum:
+        - ready
+        - in_progress
+        - paused
+        - completed
+      description: |-
+        Meeting status lifecycle
+
+        Represents the current state of a meeting throughout its lifecycle
+        PHP Class: Modules\Meeting\Enums\MeetingStatus
+
+        Endpoints:
+        - GET /api/v1/meetings (filter by status)
+        - GET /api/v1/meetings/{id} (returns status)
+        - POST /api/v1/meetings (created as 'ready')
+        - PUT /api/v1/meetings/{id} (update status)
+    Models.OauthProvider:
+      type: string
+      enum:
+        - google
+      description: |-
+        OAuth provider types
+
+        Used for social authentication
+        PHP Class: App\Enums\OauthProvider
+
+        Endpoints: GET /api/web/auth/redirect
+    Models.Order:
+      type: object
+      required:
+        - id
+        - plan
+        - status
+        - payment_method
+        - amount
+        - paid_at
+        - canceled_at
+        - metadata
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Order ID (sqid)
+        plan:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Models.Plan'
+          nullable: true
+          description: Associated plan (if order is for a plan)
+        status:
+          allOf:
+            - $ref: '#/components/schemas/Models.OrderStatus'
+          description: Order status (see OrderStatus enum)
+        payment_method:
+          allOf:
+            - $ref: '#/components/schemas/Models.PaymentMethod'
+          description: Payment method used (see PaymentMethod enum)
+        amount:
+          type: number
+          format: decimal
+          minimum: 0
+          description: Total amount in USD
+        paid_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Payment completion Unix timestamp (seconds since epoch)
+        canceled_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Order cancellation Unix timestamp (seconds since epoch)
+        metadata:
+          allOf:
+            - $ref: '#/components/schemas/Models.OrderMetadata'
+          description: Order metadata including payment information
+        created_at:
+          type: integer
+          format: int64
+          description: Order creation Unix timestamp (seconds since epoch)
+        updated_at:
+          type: integer
+          format: int64
+          description: Last update Unix timestamp (seconds since epoch)
+      description: |-
+        Order resource
+
+        Note: Timestamps are returned as Unix timestamps (seconds since epoch)
+        Resource class: App\Http\Resources\OrderResource
+    Models.OrderMetadata:
+      type: object
+      required:
+        - unit_price
+        - quantity
+        - currency
+      properties:
+        unit_price:
+          type: number
+          format: float
+          description: Unit price per item
+        quantity:
+          type: integer
+          format: int32
+          description: Quantity of items ordered
+        currency:
+          allOf:
+            - $ref: '#/components/schemas/Models.Currency'
+          description: 'Currency (see Currency enum, default: USD)'
+        payment_id:
+          type: string
+          nullable: true
+          description: Payment gateway transaction ID
+        payment_url:
+          type: string
+          nullable: true
+          description: Payment checkout URL
+      description: |-
+        Order metadata including payment information
+
+        PHP Class: Modules\Order\Data\OrderMetadata
+    Models.OrderStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - completed
+        - canceled
+      description: |-
+        Order processing status
+
+        Tracks the current state of an order from creation to completion
+        PHP Class: Modules\Order\Enums\OrderStatus
+
+        Endpoints:
+        - GET /api/v1/orders (filter by status, returns status)
+        - POST /api/v1/orders (created as 'pending', returns status)
+        - POST /api/v1/orders/{id}/cancel (returns updated status)
+    Models.PaymentMethod:
+      type: string
+      enum:
+        - stripe
+      description: |-
+        Supported payment methods
+
+        Used in Order model and CreateOrderRequest
+        PHP Class: Modules\Order\Enums\PaymentMethod
+    Models.PaymentProvider:
+      type: string
+      enum:
+        - stripe
+      description: |-
+        Payment provider types
+
+        PHP Class: Modules\Payment\Enums\PaymentProvider
+    Models.Plan:
+      type: object
+      required:
+        - id
+        - slug
+        - name
+        - description
+        - price
+        - duration_days
+        - level
+        - config
+      properties:
+        id:
+          type: string
+          description: Plan ID (sqid)
+        slug:
+          type: string
+          description: Plan slug (unique identifier)
+        name:
+          type: string
+          description: Plan name
+        description:
+          type: string
+          nullable: true
+          description: Plan description
+        price:
+          type: number
+          format: decimal
+          minimum: 0
+          description: Plan price in USD
+        duration_days:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Plan duration in days
+        level:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Plan tier level
+        config:
+          allOf:
+            - $ref: '#/components/schemas/Models.PlanConfig'
+          description: Plan configuration
+      description: Subscription plan
+    Models.PlanConfig:
+      type: object
+      required:
+        - conversation_enabled
+        - meeting_enabled
+        - max_concurrency
+        - additional_languages_enabled
+        - live_sharing_enabled
+        - max_live_sharing_concurrency
+        - included_minutes
+        - hourly_price
+        - custom_terms_number
+        - translation_terms_number
+      properties:
+        conversation_enabled:
+          type: boolean
+          description: Enable conversation mode
+        meeting_enabled:
+          type: boolean
+          description: Enable meeting mode
+        max_concurrency:
+          type: integer
+          format: int32
+          description: Maximum concurrent sessions allowed
+        additional_languages_enabled:
+          type: boolean
+          description: Enable additional languages feature
+        live_sharing_enabled:
+          type: boolean
+          description: Enable live sharing feature
+        max_live_sharing_concurrency:
+          type: integer
+          format: int32
+          description: Maximum concurrent live sharing sessions
+        included_minutes:
+          type: integer
+          format: int32
+          description: Included minutes in the plan
+        hourly_price:
+          type: number
+          format: float
+          description: Price per hour for additional minutes beyond included
+        custom_terms_number:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Maximum number of custom terms allowed in context
+        translation_terms_number:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Maximum number of translation terms allowed in context
+      description: |-
+        Plan configuration
+
+        PHP Class: Modules\Plan\Data\PlanConfig
+    Models.ProductType:
+      type: string
+      enum:
+        - plan
+        - credit
+      description: |-
+        Product types available for purchase
+
+        Used in Plan model to define what type of product is being sold
+        PHP Class: Modules\Payment\Enums\ProductType
+    Models.ShareMeeting:
+      type: object
+      required:
+        - id
+        - title
+        - status
+        - languages
+        - summary
+        - duration
+        - started_at
+        - ended_at
+        - paused_at
+      properties:
+        id:
+          type: string
+          description: Meeting ID (sqid)
+        title:
+          type: string
+          description: Meeting title
+        status:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingStatus'
+          description: Current meeting status (see MeetingStatus enum)
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingLanguages'
+          description: Language configuration (MeetingLanguages data object)
+        summary:
+          type: string
+          nullable: true
+          description: AI-generated meeting summary (null if not yet generated)
+        duration:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Meeting duration in seconds
+        started_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting start Unix timestamp (seconds since epoch, or null)
+        ended_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting end Unix timestamp (seconds since epoch, or null)
+        paused_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Meeting pause Unix timestamp (seconds since epoch, or null)
+      description: |-
+        Shared meeting resource (public view via share token)
+
+        Resource class: App\Http\Resources\ShareMeetingResource
+        Note: Enum values are serialized as strings, all timestamps are Unix timestamps (seconds since epoch)
+        Authentication: Requires auth.share middleware (JWT share token)
+    Models.StripeCallbackRequest:
+      type: object
+      required:
+        - session_id
+      properties:
+        session_id:
+          type: string
+          minLength: 30
+          maxLength: 120
+          description: Stripe checkout session ID
+      description: Stripe payment callback request
+    Models.TranscriptionContext:
+      type: object
+      properties:
+        domain:
+          type: string
+          nullable: true
+          maxLength: 50
+          description: Domain/industry of the meeting (e.g., 'medical', 'legal', 'technology')
+        topic:
+          type: string
+          nullable: true
+          maxLength: 50
+          description: Specific topic of the meeting
+        text:
+          type: string
+          nullable: true
+          maxLength: 2000
+          description: Additional context text to improve transcription accuracy
+        terms:
+          type: array
+          items:
+            type: string
+          x-typespec-name: string[]
+          nullable: true
+          maxItems: 50
+          description: Custom terminology and jargon used in the meeting
+        translation_terms:
+          type: array
+          items:
+            $ref: '#/components/schemas/Models.TranslationTerm'
+          x-typespec-name: Models.TranslationTerm[]
+          nullable: true
+          maxItems: 50
+          description: Translation term mappings for accurate translation
+      description: |-
+        Context information for transcription accuracy
+
+        PHP Class: Modules\Context\Data\TranscriptionContext
+    Models.TranscriptionData:
+      type: object
+      required:
+        - text
+        - final_ms
+        - total_ms
+        - language
+        - speaker
+        - confidence
+        - is_final
+        - sequence
+        - is_translation
+      properties:
+        text:
+          type: string
+          description: Transcribed text content
+        final_ms:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Final timestamp in milliseconds
+        total_ms:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Total timestamp in milliseconds
+        language:
+          allOf:
+            - $ref: '#/components/schemas/Models.Language'
+          description: Language of the transcription (see Language enum)
+        speaker:
+          type: string
+          nullable: true
+          description: Speaker identifier (null if speaker identification is not available)
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Confidence score (0.0 to 1.0)
+        is_final:
+          type: boolean
+          description: Whether this is a final transcription
+        sequence:
+          type: string
+          description: Sequence identifier for cursor-based pagination
+        is_translation:
+          type: boolean
+          enum:
+            - false
+          description: Always false for transcriptions
+      description: |-
+        Transcription data structure
+
+        Real-time transcription data returned from the API.
+        This structure matches the TranscriptionData DTO output.
+    Models.TranslationData:
+      type: object
+      required:
+        - text
+        - final_ms
+        - total_ms
+        - language
+        - source_language
+        - speaker
+        - confidence
+        - is_final
+        - sequence
+        - is_translation
+      properties:
+        text:
+          type: string
+          description: Translated text content
+        final_ms:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Final timestamp in milliseconds
+        total_ms:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Total timestamp in milliseconds
+        language:
+          allOf:
+            - $ref: '#/components/schemas/Models.Language'
+          description: Target language of the translation (see Language enum)
+        source_language:
+          allOf:
+            - $ref: '#/components/schemas/Models.Language'
+          description: Source language of the translation (see Language enum)
+        speaker:
+          type: string
+          nullable: true
+          description: Speaker identifier (null if speaker identification is not available)
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Confidence score (0.0 to 1.0)
+        is_final:
+          type: boolean
+          description: Whether this is a final translation
+        sequence:
+          type: string
+          description: Sequence identifier for cursor-based pagination
+        is_translation:
+          type: boolean
+          enum:
+            - true
+          description: Always true for translations
+      description: |-
+        Translation data structure
+
+        Real-time translation data returned from the API.
+        This structure matches the TranslationData DTO output.
+    Models.TranslationTerm:
+      type: object
+      required:
+        - source
+        - target
+      properties:
+        source:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Source language term
+        target:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Target language translation
+      description: |-
+        Translation term mapping for context-aware translation
+
+        PHP Class: Modules\Context\Data\TranslationTerm
+    Models.UpdateContextPresetRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Preset name
+        context:
+          allOf:
+            - $ref: '#/components/schemas/Models.TranscriptionContext'
+          description: Optional transcription context
+      description: Update context preset request
+    Models.UpdateMeetingRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 50
+          description: Meeting title
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.MeetingLanguages'
+          description: Language configuration
+        context_preset_id:
+          type: string
+          description: Optional context preset ID (sqid) to load saved transcription context. Takes priority over the 'context' field if both are provided.
+        context:
+          allOf:
+            - $ref: '#/components/schemas/Models.TranscriptionContext'
+          description: Transcription context. Ignored if 'context_preset_id' is provided.
+        two_way_translation:
+          type: boolean
+          description: Enable two-way translation (translates from target back to source)
+      description: Request to update an existing meeting
+    Models.User:
+      type: object
+      required:
+        - id
+        - name
+        - email
+        - email_verified_at
+        - config
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: User ID (sqid)
+        name:
+          type: string
+          description: User's full name
+        email:
+          type: string
+          format: email
+          description: User's email address
+        email_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Email verification timestamp
+        config:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Models.UserConfig'
+          nullable: true
+          description: User configuration
+        created_at:
+          type: string
+          format: date-time
+          description: Account creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+      description: User model representing an authenticated user
+    Models.UserConfig:
+      type: object
+      required:
+        - timezone
+      properties:
+        timezone:
+          type: string
+          nullable: true
+          description: User timezone as an IANA timezone identifier, e.g. Asia/Taipei, America/New_York, or null
+      description: |-
+        User configurable preferences
+
+        Resource shape returned by GET/PUT /api/v1/users/config
+    Models.UserDurationMetadata:
+      type: object
+      properties:
+        source:
+          type: string
+          nullable: true
+          description: Source of the duration credit (plan, purchase, etc.)
+        order_id:
+          type: string
+          nullable: true
+          description: Related order ID
+      additionalProperties: {}
+      description: |-
+        User duration metadata
+
+        PHP Class: Modules\Plan\Data\UserDurationMetadata
+    Models.UserFeatures:
+      type: object
+      required:
+        - remote_control
+      properties:
+        remote_control:
+          type: boolean
+          description: Whether remote control commands are enabled for the authenticated user
+      description: |-
+        Feature flags returned for the authenticated user
+
+        Nested in MeResource response
+    Models.UserPlanInfo:
+      type: object
+      required:
+        - id
+        - slug
+        - name
+        - level
+        - start_at
+        - end_at
+        - config
+      properties:
+        id:
+          type: string
+          description: Plan ID (sqid)
+        slug:
+          type: string
+          description: Plan slug (unique identifier)
+        name:
+          type: string
+          description: Plan name
+        level:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Plan tier level
+        start_at:
+          type: integer
+          format: int64
+          description: Plan activation Unix timestamp (seconds since epoch)
+        end_at:
+          type: integer
+          format: int64
+          description: Plan expiration Unix timestamp (seconds since epoch)
+        config:
+          allOf:
+            - $ref: '#/components/schemas/Models.PlanConfig'
+          description: Plan configuration (full PlanConfig object)
+      description: |-
+        User's active plan information
+
+        Nested in MeResource response
+    Models.UserPlanMetadata:
+      type: object
+      properties:
+        order_id:
+          type: string
+          nullable: true
+          description: Order ID that created this user plan
+      additionalProperties: {}
+      description: |-
+        User plan metadata
+
+        PHP Class: Modules\Plan\Data\UserPlanMetadata
+    Models.UserProfile:
+      type: object
+      required:
+        - id
+        - name
+        - email
+        - email_verified_at
+        - config
+        - features
+        - plan
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: User ID (sqid)
+        name:
+          type: string
+          description: User's full name
+        email:
+          type: string
+          format: email
+          description: User's email address
+        email_verified_at:
+          type: integer
+          format: int64
+          description: Email verification Unix timestamp (seconds since epoch)
+        config:
+          allOf:
+            - $ref: '#/components/schemas/Models.UserConfig'
+          description: User configuration
+        features:
+          allOf:
+            - $ref: '#/components/schemas/Models.UserFeatures'
+          description: Feature flags available to the authenticated user
+        plan:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Models.UserPlanInfo'
+          nullable: true
+          description: Current active subscription plan
+        created_at:
+          type: integer
+          format: int64
+          description: Account creation Unix timestamp (seconds since epoch)
+        updated_at:
+          type: integer
+          format: int64
+          description: Last update Unix timestamp (seconds since epoch)
+      description: |-
+        User profile with current plan information
+
+        Resource class: App\Http\Resources\MeResource
+        Note: All timestamps are Unix timestamps (seconds since epoch)
+    Models.WebSocketEvent:
+      type: string
+      enum:
+        - connection.created
+      description: |-
+        WebSocket server events
+
+        Events sent by the server to the client during WebSocket communication
+        PHP Class: App\Enums\WebSocketEvent
+
+        Used in WebSocket connections:
+        - ws://localhost:9501/websocket/meeting
+        - ws://localhost:9501/websocket/conversation
+    PaginationMeta:
+      type: object
+      required:
+        - current_page
+        - per_page
+        - total
+        - last_page
+        - first_page_url
+        - last_page_url
+        - next_page_url
+        - prev_page_url
+      properties:
+        current_page:
+          type: integer
+          format: int32
+          description: Current page number
+        per_page:
+          type: integer
+          format: int32
+          description: Number of items per page
+        total:
+          type: integer
+          format: int32
+          description: Total number of items
+        last_page:
+          type: integer
+          format: int32
+          description: Total number of pages
+        first_page_url:
+          type: string
+          description: Link to first page
+        last_page_url:
+          type: string
+          description: Link to last page
+        next_page_url:
+          type: string
+          nullable: true
+          description: Link to next page
+        prev_page_url:
+          type: string
+          nullable: true
+          description: Link to previous page
+      description: Pagination metadata
+    SendLoginEmailRequest:
+      type: object
+      required:
+        - email
+        - token
+      properties:
+        email:
+          type: string
+          description: User email address
+        token:
+          type: string
+          description: Cloudflare Turnstile token for CAPTCHA verification
+      description: Send login email request
+    SendLoginEmailResponse:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          description: Success status
+      description: Standard success response
+    SuccessResponse:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          description: Success status
+      description: Standard success response
+    TokenResponse:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: JWT authentication token
+      description: Authentication token response
+    UnauthenticatedResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          enum:
+            - Unauthenticated.
+          description: Error message
+      description: |-
+        Unauthenticated error response (403)
+        Returned when user is not authenticated or token is invalid
+    UpdateConversationRequest:
+      type: object
+      required:
+        - languages
+      properties:
+        languages:
+          allOf:
+            - $ref: '#/components/schemas/Models.ConversationLanguages'
+          description: Language configuration used by the WebSocket transcription connection
+        topic:
+          allOf:
+            - $ref: '#/components/schemas/Models.ConversationTopic'
+          nullable: true
+          description: Optional topic key returned by GET /api/v1/general, e.g. Traveling or BusinessMeeting. Send null to clear the topic.
+        two_way_translation:
+          type: boolean
+          description: Enable two-way translation (translates in both configured directions)
+      description: Request to update a short-lived conversation descriptor
+    UpdateUserConfigRequest:
+      type: object
+      properties:
+        timezone:
+          type: string
+          nullable: true
+          description: User timezone as an IANA timezone identifier, e.g. Asia/Taipei, America/New_York, or null
+      description: Update user config request
+    Versions:
+      type: string
+      enum:
+        - '1.0'
+servers:
+  - url: http://dev.rozeta.app
+    description: Development server
+    variables: {}
+  - url: https://rozeta.app
+    description: Production server
+    variables: {}

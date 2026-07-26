@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Rozeta Remote Management</title>
+	<link rel="stylesheet" href="/assets/styles.css" />
+</head>
+
+<body>
+	<main class="app-shell">
+		<header class="topbar">
+			<div>
+				<h1>Rozeta Remote Management</h1>
+				<p>Broadcast control for always-on room agents.</p>
+			</div>
+			<div class="connection-pill" id="ws-status">connecting</div>
+		</header>
+
+		<section class="alerts" id="alerts"></section>
+
+		<section class="layout">
+			<section class="panel room-list-panel">
+				<div class="panel-header">
+					<h2>Rooms</h2>
+					<button type="button" id="refresh-btn">Refresh</button>
+				</div>
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>Room</th>
+								<th>Status</th>
+								<th>Current Meeting</th>
+								<th>Heartbeat</th>
+							</tr>
+						</thead>
+						<tbody id="rooms-body"></tbody>
+					</table>
+				</div>
+			</section>
+
+			<section class="panel command-panel">
+				<div class="panel-header">
+					<h2>Command</h2>
+					<span id="selected-room-label">No room selected</span>
+				</div>
+				<label>
+					<span>Room Name</span>
+					<input id="selected-room" type="text" placeholder="room-01" />
+				</label>
+				<label>
+					<span>Meeting ID</span>
+					<input id="target-meeting" type="text" placeholder="B0e44K6Iav" />
+				</label>
+				<div class="actions">
+					<button type="button" data-action="goto">Goto</button>
+					<button type="button" data-action="start">Start</button>
+					<button type="button" data-action="pause">Pause</button>
+					<button type="button" data-action="goto_and_start" class="primary">Goto + Start</button>
+				</div>
+				<div class="details" id="room-details"></div>
+			</section>
+		</section>
+	</main>
+	<script src="/assets/app.js" defer></script>
+</body>
+
+</html>
