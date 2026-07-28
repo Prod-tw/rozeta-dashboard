@@ -92,10 +92,23 @@ function pushAlert(level, message, room) {
 }
 
 function renderAlerts() {
-	alertsNode.innerHTML = state.alerts.map(alert => {
+	alertsNode.innerHTML = state.alerts.map((alert, index) => {
 		const roomLabel = alert.room?.room_name ? `<strong>${escapeHtml(alert.room.room_name)}</strong>: ` : ''
-		return `<div class="alert">${roomLabel}${escapeHtml(alert.message)}</div>`
+		return `<button type="button" class="alert" data-alert-index="${index}" title="Click to dismiss">${roomLabel}${escapeHtml(alert.message)}</button>`
 	}).join('')
+
+	// Alerts used to stay visible until another render replaced them; clicking now dismisses only the chosen alert.
+	alertsNode.querySelectorAll('[data-alert-index]').forEach(alertNode => {
+		alertNode.addEventListener('click', () => dismissAlert(Number(alertNode.dataset.alertIndex)))
+	})
+}
+
+function dismissAlert(index) {
+	if (!Number.isInteger(index) || index < 0 || index >= state.alerts.length) {
+		return
+	}
+	state.alerts.splice(index, 1)
+	renderAlerts()
 }
 
 function render() {

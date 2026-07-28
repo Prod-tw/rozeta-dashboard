@@ -80,10 +80,25 @@ button.primary {
 }
 
 .alert {
+	display: block;
+	width: 100%;
 	padding: 12px 14px;
 	border-radius: 12px;
 	background: rgba(239, 68, 68, 0.16);
 	border: 1px solid rgba(239, 68, 68, 0.35);
+	color: var(--text);
+	text-align: left;
+	cursor: pointer;
+}
+
+.alert:hover {
+	background: rgba(239, 68, 68, 0.24);
+	border-color: rgba(239, 68, 68, 0.5);
+}
+
+.alert:focus-visible {
+	outline: 2px solid rgba(196, 181, 253, 0.9);
+	outline-offset: 2px;
 }
 
 .layout {
