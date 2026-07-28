@@ -22,6 +22,7 @@
 	let reconnectTimer = null
 	let agentManuallyDisconnected = false
 	let agentConnected = false
+	let agentConnectionTerminal = false
 	let agentState = {
 		status: 'ready',
 		currentMeetingId: '',
@@ -82,8 +83,12 @@
 
 	let panelReattachObserver = null
 
+	function isRoomRoute() {
+		return /^\/en\/meetings\/[^/]+\/room/.test(location.pathname)
+	}
+
 	function shouldShowPanel() {
-		return Boolean(currentMeetingIdFromUrl())
+		return isRoomRoute()
 	}
 
 	function getPanelHost() {
@@ -127,11 +132,15 @@
 		}
 
 		panelReattachObserver = new MutationObserver(() => {
+			// The app swaps routes without a full page load, so both the panel mount and
+			// the websocket lifecycle need to follow the current pathname. Previously the
+			// panel could disappear but the websocket stayed connected on non-room pages.
 			if (shouldShowPanel()) {
 				mountPanel()
 			} else {
 				unmountPanel()
 			}
+			syncAgentConnection()
 		})
 
 		const observeTarget = document.documentElement
@@ -255,7 +264,7 @@
 	}
 
 	function scheduleReconnect() {
-		if (agentManuallyDisconnected || reconnectTimer) {
+		if (agentManuallyDisconnected || agentConnectionTerminal || reconnectTimer) {
 			return
 		}
 		reconnectTimer = setTimeout(() => {
@@ -267,6 +276,11 @@
 	function disconnectAgent(manual = true) {
 		if (manual) {
 			agentManuallyDisconnected = true
+			agentConnectionTerminal = false
+		}
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer)
+			reconnectTimer = null
 		}
 		stopHeartbeat()
 		if (agentSocket) {
@@ -281,7 +295,29 @@
 		setAgentStatusLabel('disconnected')
 	}
 
+	function shouldConnectAgent() {
+		return isRoomRoute() && Boolean(agentServerUrlInput.value.trim()) && Boolean(agentRoomNameInput.value.trim())
+	}
+
+	function syncAgentConnection() {
+		if (shouldConnectAgent()) {
+			if (!agentSocket || agentSocket.readyState === WebSocket.CLOSED || agentSocket.readyState === WebSocket.CLOSING) {
+				connectAgent()
+			}
+			return
+		}
+
+		// Leaving the room route should stop the agent entirely; the old behavior kept
+		// the websocket alive and allowed `/en` to connect to the API server.
+		disconnectAgent(true)
+	}
+
 	function connectAgent() {
+		if (!isRoomRoute()) {
+			setAgentStatusLabel('room page only')
+			log('agent connection skipped: not on a room page')
+			return
+		}
 		const roomName = getRoomName()
 		const serverUrl = getServerUrl()
 		if (!roomName) {
@@ -296,6 +332,7 @@
 		}
 
 		agentManuallyDisconnected = false
+		agentConnectionTerminal = false
 		if (reconnectTimer) {
 			clearTimeout(reconnectTimer)
 			reconnectTimer = null
@@ -347,19 +384,30 @@
 			})
 		})
 
-		ws.addEventListener('close', () => {
+		ws.addEventListener('close', event => {
 			stopHeartbeat()
 			agentConnected = false
+			agentSocket = null
+			if (event.code === 4409) {
+				agentConnectionTerminal = true
+				agentManuallyDisconnected = true
+				setAgentState({ status: 'error', lastError: event.reason || 'room already has an agent connected' })
+				setAgentStatusLabel('room already connected')
+				log(event.reason || 'agent connection failed: room already has an agent connected')
+				return
+			}
 			setAgentStatusLabel('disconnected')
-			if (!agentManuallyDisconnected) {
+			if (!agentManuallyDisconnected && !agentConnectionTerminal) {
 				scheduleReconnect()
 			}
 		})
 
 		ws.addEventListener('error', () => {
 			agentConnected = false
+			setAgentState({ status: 'error', lastError: 'websocket error' })
 			setAgentStatusLabel('error')
 		})
+
 	}
 
 	agentServerUrlInput.value = localStorage.getItem(SERVER_URL_KEY) || 'http://127.0.0.1:8080'
@@ -383,7 +431,5 @@
 		disconnectAgent(true)
 	})
 
-	if (agentServerUrlInput.value.trim() && agentRoomNameInput.value.trim()) {
-		connectAgent()
-	}
+	syncAgentConnection()
 })()

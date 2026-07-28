@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"sort"
 	"strings"
@@ -12,27 +12,28 @@ import (
 )
 
 type state struct {
-	mu               sync.RWMutex
-	rooms            map[string]*roomState
-	meetingNames     map[string]string
-	agentClients     map[*agentClient]struct{}
-	adminClients     map[*adminClient]struct{}
-	commandRevision  map[string]int
+	mu              sync.RWMutex
+	rooms           map[string]*roomState
+	meetingNames    map[string]string
+	agentClients    map[*agentClient]struct{}
+	roomOwners      map[string]*agentClient
+	adminClients    map[*adminClient]struct{}
+	commandRevision map[string]int
 }
 
 type roomState struct {
-	roomName            string
-	agentID             string
-	status              string
-	currentMeetingID    string
-	lastCommandID       string
-	lastCommandResult   string
-	lastError           string
-	lastHeartbeatAt     time.Time
-	updatedAt           time.Time
-	pendingCommandID    string
+	roomName             string
+	agentID              string
+	status               string
+	currentMeetingID     string
+	lastCommandID        string
+	lastCommandResult    string
+	lastError            string
+	lastHeartbeatAt      time.Time
+	updatedAt            time.Time
+	pendingCommandID     string
 	pendingCommandAction string
-	lostNotified        bool
+	lostNotified         bool
 }
 
 func newState() *state {
@@ -45,6 +46,7 @@ func newState() *state {
 		rooms:           make(map[string]*roomState),
 		meetingNames:    meetingNames,
 		agentClients:    make(map[*agentClient]struct{}),
+		roomOwners:      make(map[string]*agentClient),
 		adminClients:    make(map[*adminClient]struct{}),
 		commandRevision: make(map[string]int),
 	}
@@ -243,7 +245,41 @@ func (s *state) registerAgent(client *agentClient) {
 func (s *state) unregisterAgent(client *agentClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// This release is needed because the previous behavior only forgot the socket,
+	// which left the room usable by a second agent even while the first one was still
+	// considered connected. Releasing ownership here makes room claims exclusive.
+	for roomName, owner := range s.roomOwners {
+		if owner == client {
+			delete(s.roomOwners, roomName)
+		}
+	}
 	delete(s.agentClients, client)
+}
+
+func (s *state) claimRoom(roomName string, client *agentClient) (*roomState, bool) {
+	roomName = strings.TrimSpace(roomName)
+	if roomName == "" {
+		return &roomState{}, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room, ok := s.rooms[roomName]
+	if !ok {
+		room = &roomState{roomName: roomName, status: "ready", updatedAt: time.Now().UTC()}
+		s.rooms[roomName] = room
+	}
+
+	if owner, occupied := s.roomOwners[roomName]; occupied && owner != client {
+		return room, false
+	}
+
+	// Claiming the room during the hello handshake ensures the server rejects the
+	// second websocket immediately instead of letting both agents stream heartbeats.
+	s.roomOwners[roomName] = client
+	return room, true
 }
 
 func (s *state) registerAdmin(client *adminClient) {
@@ -269,17 +305,17 @@ func (r *roomState) snapshotLocked(meetingNames map[string]string) roomView {
 		age = time.Since(r.lastHeartbeatAt).Seconds()
 	}
 	return roomView{
-		RoomName:            r.roomName,
-		AgentID:             r.agentID,
-		Status:              r.status,
-		CurrentMeetingID:    r.currentMeetingID,
+		RoomName:             r.roomName,
+		AgentID:              r.agentID,
+		Status:               r.status,
+		CurrentMeetingID:     r.currentMeetingID,
 		CurrentMeetingName:   meetingName,
-		LastCommandID:       r.lastCommandID,
-		LastCommandResult:   r.lastCommandResult,
-		LastError:           r.lastError,
-		LastHeartbeatAt:     r.lastHeartbeatAt,
-		HeartbeatAgeSeconds: age,
-		PendingCommandID:    r.pendingCommandID,
+		LastCommandID:        r.lastCommandID,
+		LastCommandResult:    r.lastCommandResult,
+		LastError:            r.lastError,
+		LastHeartbeatAt:      r.lastHeartbeatAt,
+		HeartbeatAgeSeconds:  age,
+		PendingCommandID:     r.pendingCommandID,
 		PendingCommandAction: r.pendingCommandAction,
 		UpdatedAt:            r.updatedAt,
 	}

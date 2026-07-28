@@ -1,8 +1,8 @@
 package main
 
 import (
-	"errors"
 	"encoding/json"
+	"errors"
 	"log"
 	"time"
 
@@ -20,6 +20,10 @@ type adminClient struct {
 	conn *websocket.Conn
 	send chan []byte
 }
+
+const roomOccupiedCloseCode = 4409
+
+var errRoomOccupied = errors.New("room already has an agent connected")
 
 func newAgentClient(conn *websocket.Conn) *agentClient {
 	return &agentClient{conn: conn, send: make(chan []byte, 32)}
@@ -94,6 +98,14 @@ func (c *agentClient) readPump(a *app) {
 		}
 		if err := a.onAgentMessage(c, msg); err != nil {
 			log.Printf("agent message error: %v", err)
+			if errors.Is(err, errRoomOccupied) {
+				_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(roomOccupiedCloseCode, err.Error()), time.Now().Add(time.Second))
+			} else {
+				_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, err.Error()), time.Now().Add(time.Second))
+			}
+			// A rejected hello must terminate the websocket so the browser stops
+			// reconnecting after the server has already denied the room claim.
+			return
 		}
 	}
 }
@@ -120,16 +132,21 @@ func (a *app) onAgentMessage(client *agentClient, payload []byte) error {
 	typeName, _ := msg["type"].(string)
 	switch typeName {
 	case "agent_hello":
-		client.roomName, _ = msg["room_name"].(string)
-		client.agentID, _ = msg["agent_id"].(string)
-		if client.roomName == "" {
+		roomName, _ := msg["room_name"].(string)
+		agentID, _ := msg["agent_id"].(string)
+		if roomName == "" {
 			return errors.New("missing room_name in agent_hello")
 		}
-		if client.agentID == "" {
-			client.agentID = newID("agent")
+		if agentID == "" {
+			agentID = newID("agent")
 		}
-		a.state.ensureRoom(client.roomName)
-		a.broadcastToAdmins(adminEnvelope{Type: "agent_connected", Message: "agent connected for " + client.roomName, Timestamp: time.Now().UTC()})
+		room, claimed := a.state.claimRoom(roomName, client)
+		if !claimed {
+			return errRoomOccupied
+		}
+		client.roomName = roomName
+		client.agentID = agentID
+		a.broadcastToAdmins(adminEnvelope{Type: "agent_connected", Message: "agent connected for " + roomName, Room: room.snapshot(a.state.meetingNames), Timestamp: time.Now().UTC()})
 		return nil
 	case "agent_heartbeat":
 		var hb snapshotHeartbeat
