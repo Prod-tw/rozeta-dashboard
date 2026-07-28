@@ -4,6 +4,7 @@
 // @version      0.1.0
 // @description  Small top-right panel to send Rozeta remote-control commands from the meeting room page.
 // @match        https://rozeta.app/en/meetings/*/room*
+// @match        https://rozeta.app/*
 // @run-at       document-end
 // @grant        none
 // ==/UserScript==
@@ -100,7 +101,68 @@
 		<pre id="rozeta-command-panel-log" style="margin:0;max-height:180px;overflow:auto;padding:8px;border-radius:8px;background:#030712;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
 	`
 
-	document.documentElement.appendChild(panel)
+	let panelReattachObserver = null
+
+	function shouldShowPanel() {
+		return Boolean(currentMeetingIdFromUrl())
+	}
+
+	function getPanelHost() {
+		return document.body || document.documentElement
+	}
+
+	function mountPanel() {
+		const host = getPanelHost()
+		if (!host) {
+			return false
+		}
+
+		// Rozeta is a client-routed app, so the meeting room DOM can be replaced after
+		// startup. The old one-shot append could disappear during navigation; this keeps
+		// one panel instance and reattaches it whenever the room route is active.
+		if (panel.parentElement !== host) {
+			host.appendChild(panel)
+		}
+
+		return true
+	}
+
+	function unmountPanel() {
+		if (panel.isConnected) {
+			panel.remove()
+		}
+	}
+
+	function syncPanelMount() {
+		if (shouldShowPanel()) {
+			mountPanel()
+			return
+		}
+
+		unmountPanel()
+	}
+
+	function startPanelReattachObserver() {
+		if (panelReattachObserver) {
+			return
+		}
+
+		panelReattachObserver = new MutationObserver(() => {
+			if (shouldShowPanel()) {
+				mountPanel()
+			} else {
+				unmountPanel()
+			}
+		})
+
+		const observeTarget = document.documentElement
+		if (observeTarget) {
+			panelReattachObserver.observe(observeTarget, { childList: true, subtree: true })
+		}
+	}
+
+	syncPanelMount()
+	startPanelReattachObserver()
 
 	const targetInput = panel.querySelector('#rozeta-command-panel-target')
 	const statusNode = panel.querySelector('#rozeta-command-panel-status')
@@ -667,6 +729,7 @@
 	setInterval(() => {
 		if (location.pathname !== lastPath) {
 			lastPath = location.pathname
+			syncPanelMount()
 			syncInputFromUrl()
 			setAgentState({ currentMeetingId: currentMeetingIdFromUrl() })
 			maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
