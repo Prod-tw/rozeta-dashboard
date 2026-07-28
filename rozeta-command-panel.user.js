@@ -16,6 +16,8 @@
 	const SERVER_URL_KEY = 'rozeta-agent-server-url'
 	const ROOM_NAME_KEY = 'rozeta-agent-room-name'
 	const AGENT_ID_KEY = 'rozeta-agent-id'
+	const PENDING_AUTO_START_KEY = 'rozeta-command-panel-pending-auto-start'
+	const RECENT_COMMAND_LIMIT = 50
 
 	let agentSocket = null
 	let heartbeatTimer = null
@@ -23,6 +25,7 @@
 	let agentManuallyDisconnected = false
 	let agentConnected = false
 	let agentConnectionTerminal = false
+	let recentCommandIds = []
 	let agentState = {
 		status: 'ready',
 		currentMeetingId: '',
@@ -141,6 +144,7 @@
 				unmountPanel()
 			}
 			syncAgentConnection()
+			maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
 		})
 
 		const observeTarget = document.documentElement
@@ -224,6 +228,227 @@
 
 	function getServerUrl() {
 		return normalizeServerUrl(agentServerUrlInput.value)
+	}
+
+	function isRecentCommand(commandId) {
+		return recentCommandIds.includes(commandId)
+	}
+
+	// The websocket can replay the same command after reconnects, so the agent keeps
+	// a small in-memory history. Before this fix the listener called an undefined
+	// helper and crashed; now duplicate commands are skipped safely.
+	function rememberCommand(commandId) {
+		if (!commandId || isRecentCommand(commandId)) {
+			return false
+		}
+
+		recentCommandIds.push(commandId)
+		if (recentCommandIds.length > RECENT_COMMAND_LIMIT) {
+			recentCommandIds = recentCommandIds.slice(-RECENT_COMMAND_LIMIT)
+		}
+		return true
+	}
+
+	function roomUrlForMeetingId(meetingId) {
+		return new URL(`/en/meetings/${encodeURIComponent(meetingId)}/room`, location.origin).toString()
+	}
+
+	function getClickableLabel(node) {
+		return [node.textContent, node.getAttribute?.('aria-label'), node.getAttribute?.('title'), node.getAttribute?.('data-tooltip')]
+			.filter(Boolean)
+			.join(' ')
+			.trim()
+	}
+
+	function describeElement(node) {
+		if (!node) return 'null'
+		const tag = node.tagName?.toLowerCase() || 'unknown'
+		const id = node.id ? `#${node.id}` : ''
+		const cls = node.className && typeof node.className === 'string' ? `.${node.className.trim().split(/\s+/).slice(0, 4).join('.')}` : ''
+		const label = getClickableLabel(node)
+		return `${tag}${id}${cls}${label ? ` :: ${label}` : ''}`
+	}
+
+	function clickLikeUser(element) {
+		if (!element) return false
+
+		const options = { bubbles: true, cancelable: true, view: window }
+		const PointerEvt = window.PointerEvent || MouseEvent
+		element.dispatchEvent(new PointerEvt('pointerdown', options))
+		element.dispatchEvent(new MouseEvent('mousedown', options))
+		element.dispatchEvent(new PointerEvt('pointerup', options))
+		element.dispatchEvent(new MouseEvent('mouseup', options))
+		element.dispatchEvent(new MouseEvent('click', options))
+		element.click()
+		return true
+	}
+
+	function findButtonByText(pattern) {
+		const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+		return buttons.find(button => !button.closest(`#${PANEL_ID}`) && pattern.test(getClickableLabel(button))) || null
+	}
+
+	function findCaptionButton(labelPattern) {
+		const captions = Array.from(document.querySelectorAll('span, div, small'))
+			.filter(node => !node.closest(`#${PANEL_ID}`))
+			.filter(node => labelPattern.test(node.textContent?.trim() || ''))
+
+		for (const caption of captions) {
+			const previous = caption.previousElementSibling
+			if (previous instanceof HTMLButtonElement && !previous.closest(`#${PANEL_ID}`)) {
+				return previous
+			}
+
+			const parentButton = caption.parentElement?.querySelector('button')
+			if (parentButton instanceof HTMLButtonElement && !parentButton.closest(`#${PANEL_ID}`)) {
+				return parentButton
+			}
+
+			const nearbyButton = caption.closest('div')?.querySelector('button')
+			if (nearbyButton instanceof HTMLButtonElement && !nearbyButton.closest(`#${PANEL_ID}`)) {
+				return nearbyButton
+			}
+		}
+
+		return null
+	}
+
+	function findIconButton(iconPattern) {
+		const buttons = Array.from(document.querySelectorAll('button'))
+		return buttons.find(button => {
+			if (button.closest(`#${PANEL_ID}`)) return false
+			return iconPattern.test(button.innerHTML) || iconPattern.test(getClickableLabel(button))
+		}) || null
+	}
+
+	function findCaptionedControl(labelPattern, iconPattern) {
+		return findCaptionButton(labelPattern) || findIconButton(iconPattern) || findButtonByText(labelPattern)
+	}
+
+	function waitFor(predicate, timeoutMs = 8000, intervalMs = 100) {
+		return new Promise((resolve, reject) => {
+			const startedAt = Date.now()
+			const tick = () => {
+				const value = predicate()
+				if (value) {
+					resolve(value)
+					return
+				}
+				if (Date.now() - startedAt >= timeoutMs) {
+					reject(new Error('timed out waiting for DOM target'))
+					return
+				}
+				setTimeout(tick, intervalMs)
+			}
+			tick()
+		})
+	}
+
+	async function clickStartButtonDom() {
+		setStatus('searching DOM')
+		log('searching DOM for start control')
+
+		const button = await waitFor(() => findCaptionedControl(/^(start|開始|開始辨識)$/iu, /i-lucide:play|lucide:play|aria-label=["']?start["']?/iu))
+
+		log(`found start control: ${describeElement(button)}`)
+		clickLikeUser(button)
+		await waitFor(() => findCaptionedControl(/^(pause|暫停|停止)$/iu, /i-lucide:pause|lucide:pause|aria-label=["']?pause["']?/iu), 10000)
+		setStatus('clicked start')
+		log('start state confirmed')
+	}
+
+	async function clickPauseButtonDom() {
+		setStatus('searching DOM')
+		log('searching DOM for pause control')
+
+		const button = await waitFor(() => findCaptionedControl(/^(pause|暫停|停止)$/iu, /i-lucide:pause|lucide:pause|aria-label=["']?pause["']?/iu))
+
+		log(`found pause control: ${describeElement(button)}`)
+		clickLikeUser(button)
+		await waitFor(() => findCaptionedControl(/^(start|開始|開始辨識)$/iu, /i-lucide:play|lucide:play|aria-label=["']?start["']?/iu), 10000)
+		setStatus('clicked pause')
+		log('pause state confirmed')
+	}
+
+	function setPendingAutoStart(meetingId) {
+		localStorage.setItem(PENDING_AUTO_START_KEY, meetingId)
+	}
+
+	function clearPendingAutoStart() {
+		localStorage.removeItem(PENDING_AUTO_START_KEY)
+	}
+
+	function getPendingAutoStart() {
+		return localStorage.getItem(PENDING_AUTO_START_KEY) || ''
+	}
+
+	async function maybeTriggerPendingAutoStart() {
+		const pendingMeetingId = getPendingAutoStart()
+		const currentMeetingId = currentMeetingIdFromUrl()
+		if (!pendingMeetingId || !currentMeetingId || pendingMeetingId !== currentMeetingId) {
+			return
+		}
+
+		clearPendingAutoStart()
+		log(`pending auto-start matched URL: ${currentMeetingId}`)
+		setTimeout(() => {
+			clickStartButtonDom()
+				.then(() => {
+					setAgentState({ status: 'in_progress', lastCommandResult: 'started', currentMeetingId: currentMeetingIdFromUrl() })
+				})
+				.catch(error => log(error instanceof Error ? error.message : String(error)))
+		}, 800)
+	}
+
+	async function gotoMeetingByUrl(meetingId) {
+		if (!meetingId) {
+			throw new Error('missing meeting id')
+		}
+
+		const nextUrl = roomUrlForMeetingId(meetingId)
+		log(`navigating to ${nextUrl}`)
+		setStatus('navigating')
+		location.href = nextUrl
+	}
+
+	// The server now broadcasts `command` envelopes to agents, so the browser-side
+	// handler has to execute them directly. Before this fix the websocket listener
+	// crashed at the missing helper and never reached the DOM click path.
+	async function handleAgentCommand(command) {
+		setAgentState({
+			lastCommandId: command.command_id,
+			lastCommandResult: 'running',
+			lastError: '',
+			currentMeetingId: currentMeetingIdFromUrl(),
+		})
+		log(`command ${command.action} received for ${command.room_name}`)
+
+		switch (command.action) {
+			case 'goto':
+				setAgentState({ status: 'switching' })
+				await gotoMeetingByUrl(command.target_meeting_id)
+				setAgentState({ lastCommandResult: 'done' })
+				return
+			case 'start':
+				setAgentState({ status: 'in_progress' })
+				await clickStartButtonDom()
+				setAgentState({ lastCommandResult: 'started', status: 'in_progress' })
+				return
+			case 'pause':
+				setAgentState({ status: 'paused' })
+				await clickPauseButtonDom()
+				setAgentState({ lastCommandResult: 'paused', status: 'paused' })
+				return
+			case 'goto_and_start':
+				setAgentState({ status: 'switching' })
+				setPendingAutoStart(command.target_meeting_id)
+				await gotoMeetingByUrl(command.target_meeting_id)
+				setAgentState({ lastCommandResult: 'navigating' })
+				return
+			default:
+				setAgentState({ lastCommandResult: 'ignored' })
+				return
+		}
 	}
 
 	function sendAgentMessage(message) {
@@ -432,4 +657,5 @@
 	})
 
 	syncAgentConnection()
+	maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
 })()
