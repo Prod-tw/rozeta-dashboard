@@ -34,28 +34,52 @@
 		lastError: '',
 	}
 
-	// Keep the panel on top-right so it stays out of the main meeting controls.
+	// Keep the panel on bottom-right so it stays out of the main meeting controls.
 	// The page previously had no in-page controller for remote commands; this adds
 	// a lightweight overlay without depending on Rozeta's internal UI structure.
 	const panel = document.createElement('div')
 	panel.id = PANEL_ID
 	panel.style.cssText = [
 		'position:fixed',
-		'top:12px',
+		'bottom:12px',
 		'right:12px',
 		'z-index:2147483647',
-		'width:360px',
-		'padding:12px',
+		'width:48px',
+		'height:48px',
+		'padding:0',
+		'overflow:hidden',
+		'box-sizing:border-box',
 		'background:rgba(17, 24, 39, 0.96)',
 		'color:#f9fafb',
 		'border:1px solid rgba(255,255,255,0.12)',
-		'border-radius:12px',
+		'border-radius:14px',
 		'box-shadow:0 10px 30px rgba(0,0,0,0.35)',
 		'font:12px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-		'backdrop-filter:blur(8px)'
+		'backdrop-filter:blur(8px)',
+		'transition:width 180ms ease, height 180ms ease, padding 180ms ease, border-radius 180ms ease'
 	].join(';')
 
-	panel.innerHTML = `
+	const trigger = document.createElement('div')
+	// The collapsed state should look like a launcher, not an empty box, so the icon
+	// now makes the hidden panel obvious before hover expands it.
+	trigger.textContent = '⋮'
+	Object.assign(trigger.style, {
+		position: 'absolute',
+		right: '0',
+		top: '0',
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		width: '48px',
+		height: '48px',
+		cursor: 'default',
+		fontSize: '18px',
+		transition: 'opacity 120ms ease',
+		userSelect: 'none',
+	})
+
+	const content = document.createElement('div')
+	content.innerHTML = `
 		<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
 			<strong style="font-size:13px;">Rozeta Command Panel</strong>
 			<span id="rozeta-command-panel-status" style="color:#9ca3af;">idle</span>
@@ -83,15 +107,24 @@
 		</div>
 		<pre id="rozeta-command-panel-log" style="margin:0;max-height:180px;overflow:auto;padding:8px;border-radius:8px;background:#030712;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
 	`
+	Object.assign(content.style, {
+		width: '336px',
+		opacity: '0',
+		visibility: 'hidden',
+		transition: 'opacity 120ms ease',
+	})
 
-	let panelReattachObserver = null
+	panel.append(trigger, content)
+
+	let routeWatchTimer = null
+	let lastObservedHref = location.href
 
 	function isRoomRoute() {
 		return /^\/en\/meetings\/[^/]+\/room/.test(location.pathname)
 	}
 
 	function shouldShowPanel() {
-		return isRoomRoute()
+		return true
 	}
 
 	function getPanelHost() {
@@ -129,32 +162,31 @@
 		unmountPanel()
 	}
 
-	function startPanelReattachObserver() {
-		if (panelReattachObserver) {
+	function startRouteWatcher() {
+		if (routeWatchTimer) {
 			return
 		}
 
-		panelReattachObserver = new MutationObserver(() => {
-			// The app swaps routes without a full page load, so both the panel mount and
-			// the websocket lifecycle need to follow the current pathname. Previously the
-			// panel could disappear but the websocket stayed connected on non-room pages.
-			if (shouldShowPanel()) {
-				mountPanel()
-			} else {
-				unmountPanel()
+		const syncIfRouteChanged = () => {
+			if (location.href === lastObservedHref) {
+				return
 			}
-			syncAgentConnection()
-			maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
-		})
 
-		const observeTarget = document.documentElement
-		if (observeTarget) {
-			panelReattachObserver.observe(observeTarget, { childList: true, subtree: true })
+			lastObservedHref = location.href
+			// Rozeta is a client-routed app, so we only need to react when the URL changes.
+			// The previous DOM-wide observer retriggered on routine page mutations and could
+			// churn the home page. This keeps the panel responsive without watching the whole tree.
+			mountPanel()
+			syncPanelState()
 		}
+
+		window.addEventListener('popstate', syncIfRouteChanged)
+		window.addEventListener('hashchange', syncIfRouteChanged)
+		routeWatchTimer = window.setInterval(syncIfRouteChanged, 500)
 	}
 
 	syncPanelMount()
-	startPanelReattachObserver()
+	startRouteWatcher()
 
 	const statusNode = panel.querySelector('#rozeta-command-panel-status')
 	const agentStatusNode = panel.querySelector('#rozeta-agent-connection-status')
@@ -162,6 +194,105 @@
 	const agentRoomNameInput = panel.querySelector('#rozeta-agent-room-name')
 	const agentSummaryNode = panel.querySelector('#rozeta-agent-summary')
 	const logNode = panel.querySelector('#rozeta-command-panel-log')
+	const connectButton = panel.querySelector('#rozeta-agent-connect')
+	const disconnectButton = panel.querySelector('#rozeta-agent-disconnect')
+
+	let hideTimer = null
+	let lastRoomRoute = null
+	let isPanelDisabled = false
+
+	function expandPanel() {
+		if (isPanelDisabled) {
+			return
+		}
+
+		window.clearTimeout(hideTimer)
+
+		Object.assign(panel.style, {
+			width: '360px',
+			height: 'auto',
+			padding: '12px',
+			borderRadius: '12px',
+		})
+
+		trigger.style.opacity = '0'
+		content.style.visibility = 'visible'
+
+		requestAnimationFrame(() => {
+			content.style.opacity = '1'
+		})
+	}
+
+	function collapsePanel() {
+		hideTimer = window.setTimeout(() => {
+			content.style.opacity = '0'
+
+			Object.assign(panel.style, {
+				width: '48px',
+				height: '48px',
+				padding: '0',
+				borderRadius: '14px',
+			})
+
+			window.setTimeout(() => {
+				content.style.visibility = 'hidden'
+				trigger.style.opacity = '1'
+			}, 160)
+		}, 250)
+	}
+
+	panel.addEventListener('mouseenter', () => {
+		if (isPanelDisabled) {
+			return
+		}
+
+		expandPanel()
+	})
+
+	panel.addEventListener('mouseleave', () => {
+		collapsePanel()
+	})
+
+	function setControlsDisabled(disabled) {
+		isPanelDisabled = disabled
+		agentServerUrlInput.disabled = disabled
+		agentRoomNameInput.disabled = disabled
+		connectButton.disabled = disabled
+		disconnectButton.disabled = disabled
+		connectButton.style.cursor = disabled ? 'not-allowed' : 'pointer'
+		disconnectButton.style.cursor = disabled ? 'not-allowed' : 'pointer'
+		panel.style.opacity = disabled ? '0.72' : '1'
+		panel.dataset.disabled = disabled ? 'true' : 'false'
+
+		if (disabled) {
+			// Disabled mode should remain collapsed so it behaves like an unavailable
+			// launcher rather than an interactive panel that still opens on hover.
+			collapsePanel()
+		}
+	}
+
+	function syncPanelState() {
+		const roomPage = isRoomRoute()
+		setControlsDisabled(!roomPage)
+
+		if (lastRoomRoute !== roomPage) {
+			lastRoomRoute = roomPage
+			setStatus(roomPage ? 'ready' : 'room page only')
+		}
+
+		// The panel used to vanish off room pages, which made it look like the feature
+		// was broken rather than unavailable. Now the same shell stays visible and the
+		// controls are explicitly disabled outside the meeting room route.
+		if (roomPage) {
+			syncAgentConnection()
+			maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
+			return
+		}
+
+		disconnectAgent(true)
+		setAgentStatusLabel('disabled')
+		setAgentState({ status: 'disabled', lastError: '', lastCommandResult: '' })
+	}
 
 	function setStatus(text) {
 		statusNode.textContent = text
@@ -638,7 +769,7 @@
 	agentServerUrlInput.value = localStorage.getItem(SERVER_URL_KEY) || 'http://127.0.0.1:8080'
 	agentRoomNameInput.value = localStorage.getItem(ROOM_NAME_KEY) || ''
 	renderAgentSummary()
-	setStatus('ready')
+	setStatus(isRoomRoute() ? 'ready' : 'room page only')
 	log('panel loaded')
 
 	agentServerUrlInput.addEventListener('change', () => {
@@ -647,15 +778,18 @@
 	agentRoomNameInput.addEventListener('change', () => {
 		localStorage.setItem(ROOM_NAME_KEY, agentRoomNameInput.value.trim())
 	})
-	panel.querySelector('#rozeta-agent-connect').addEventListener('click', () => {
+	connectButton.addEventListener('click', () => {
+		if (!isRoomRoute()) {
+			setStatus('room page only')
+			return
+		}
 		localStorage.setItem(SERVER_URL_KEY, agentServerUrlInput.value.trim())
 		localStorage.setItem(ROOM_NAME_KEY, agentRoomNameInput.value.trim())
 		connectAgent()
 	})
-	panel.querySelector('#rozeta-agent-disconnect').addEventListener('click', () => {
+	disconnectButton.addEventListener('click', () => {
 		disconnectAgent(true)
 	})
 
-	syncAgentConnection()
-	maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
+	syncPanelState()
 })()
