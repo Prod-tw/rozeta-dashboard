@@ -2,33 +2,27 @@
 
 ## Overview
 
-This repository documents a remote management flow for Rozeta meeting rooms.
+- `go run .` starts the only backend process: Gin HTTP, websocket, and the embedded admin UI.
+- `main.go` wires the server, `state.go` owns room state, and `ws.go` owns websocket session handling.
+- `rozeta-command-panel.user.js` is the room-side userscript; `token.js` only sets the Rozeta `auth_token` cookie.
 
-The main pieces are:
+## Run
 
-- `rozeta-command-panel.user.js` for browser automation
-- backend websocket and room-state services
-- admin UI for operators
+- Open the admin UI at `http://localhost:8080` after `go run .`.
+- Load `rozeta-command-panel.user.js` into Tampermonkey on each always-on room browser.
+- Set the same backend URL and room name in the userscript panel.
 
-## How to Start
+## Commands
 
-1. Run `go run .`.
-2. Open `http://localhost:8080` and verify the admin UI loads.
-3. Load `rozeta-command-panel.user.js` into Tampermonkey.
-4. Open a Rozeta room page in an always-on browser.
-5. Set the backend URL and room name in the userscript panel.
+- `go test ./...` runs the Go tests.
+- `go test ./... -run TestAgentHelloRejectsDuplicateRoom` is the focused websocket ownership check.
 
-## How to Debug
+## Runtime Facts
 
-- Check the userscript log panel in the top-right corner.
-- Check browser console output for DOM matching logs.
-- Verify heartbeat arrival every 1 second.
-- Confirm the backend marks a room lost after 3 seconds without heartbeat.
-- Verify command routing by room name and current meeting id.
-- Watch the admin alert strip for heartbeat-loss events.
-
-## Notes
-
-- Room state is updated from heartbeat snapshots.
-- Commands are broadcast, but agents only execute matching room commands.
-- `goto_and_start` is the preferred combined flow for switching and resuming.
+- Agents connect on `/ws/agent`; admins connect on `/ws/admin`.
+- Heartbeats are sent every 1 second, and rooms are marked lost after 3 seconds without one.
+- Room claims are exclusive: the server rejects a second agent for the same room with websocket close code `4409`.
+- Commands are broadcast to all agents, but each agent only executes messages for its own room name.
+- Supported commands are `goto`, `start`, `pause`, and `goto_and_start`.
+- `meeting-names.json` in the repo root is optional and maps meeting IDs to display names.
+- `goto_and_start` is the preferred flow when switching meetings and resuming capture.

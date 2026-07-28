@@ -15,16 +15,16 @@
 	const PANEL_ID = 'rozeta-command-panel'
 	const SERVER_URL_KEY = 'rozeta-agent-server-url'
 	const ROOM_NAME_KEY = 'rozeta-agent-room-name'
+	const PENDING_TOKEN_CONNECT_KEY = 'rozeta-token-pending-connect'
 	const AGENT_ID_KEY = 'rozeta-agent-id'
 	const PENDING_AUTO_START_KEY = 'rozeta-command-panel-pending-auto-start'
+	const COOKIE_NAME = 'auth_token'
 	const RECENT_COMMAND_LIMIT = 50
 
 	let agentSocket = null
 	let heartbeatTimer = null
-	let reconnectTimer = null
 	let agentManuallyDisconnected = false
 	let agentConnected = false
-	let agentConnectionTerminal = false
 	let recentCommandIds = []
 	let agentState = {
 		status: 'ready',
@@ -95,15 +95,22 @@
 					style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.16);background:#111827;color:#f9fafb;outline:none;" />
 			</label>
 			<label style="display:block;margin-bottom:8px;">
-				<div style="margin-bottom:4px;color:#d1d5db;">Room Name</div>
+				<div style="margin-bottom:4px;color:#d1d5db;">Room ID / Name</div>
 				<input id="rozeta-agent-room-name" type="text" autocomplete="off" spellcheck="false"
 					style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.16);background:#111827;color:#f9fafb;outline:none;" />
 			</label>
 			<div style="display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:8px;">
-				<button type="button" id="rozeta-agent-connect" style="padding:8px 10px;border:0;border-radius:8px;background:#2563eb;color:white;font-weight:600;cursor:pointer;">Connect</button>
+				<button type="button" id="rozeta-agent-login" style="padding:8px 10px;border:0;border-radius:8px;background:#7c3aed;color:white;font-weight:600;cursor:pointer;">Login &amp; Connect</button>
 				<button type="button" id="rozeta-agent-disconnect" style="padding:8px 10px;border:0;border-radius:8px;background:#374151;color:white;font-weight:600;cursor:pointer;">Disconnect</button>
 			</div>
 			<div id="rozeta-agent-summary" style="margin-top:8px;color:#9ca3af;word-break:break-word;"></div>
+		</div>
+		<div style="padding:10px;margin-bottom:10px;border:1px solid rgba(255,255,255,0.10);border-radius:10px;background:rgba(255,255,255,0.03);">
+			<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+				<strong style="font-size:12px;">Token Login</strong>
+				<span id="rozeta-token-status" style="color:#9ca3af;">idle</span>
+			</div>
+			<div style="color:#9ca3af;font-size:12px;line-height:1.4;">Use the primary action above to fetch the token and connect.</div>
 		</div>
 		<pre id="rozeta-command-panel-log" style="margin:0;max-height:180px;overflow:auto;padding:8px;border-radius:8px;background:#030712;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
 	`
@@ -193,19 +200,15 @@
 	const agentServerUrlInput = panel.querySelector('#rozeta-agent-server-url')
 	const agentRoomNameInput = panel.querySelector('#rozeta-agent-room-name')
 	const agentSummaryNode = panel.querySelector('#rozeta-agent-summary')
+	const tokenStatusNode = panel.querySelector('#rozeta-token-status')
+	const tokenFetchButton = panel.querySelector('#rozeta-agent-login')
 	const logNode = panel.querySelector('#rozeta-command-panel-log')
-	const connectButton = panel.querySelector('#rozeta-agent-connect')
 	const disconnectButton = panel.querySelector('#rozeta-agent-disconnect')
 
 	let hideTimer = null
 	let lastRoomRoute = null
-	let isPanelDisabled = false
 
 	function expandPanel() {
-		if (isPanelDisabled) {
-			return
-		}
-
 		window.clearTimeout(hideTimer)
 
 		Object.assign(panel.style, {
@@ -242,10 +245,6 @@
 	}
 
 	panel.addEventListener('mouseenter', () => {
-		if (isPanelDisabled) {
-			return
-		}
-
 		expandPanel()
 	})
 
@@ -253,45 +252,34 @@
 		collapsePanel()
 	})
 
-	function setControlsDisabled(disabled) {
-		isPanelDisabled = disabled
-		agentServerUrlInput.disabled = disabled
-		agentRoomNameInput.disabled = disabled
-		connectButton.disabled = disabled
-		disconnectButton.disabled = disabled
-		connectButton.style.cursor = disabled ? 'not-allowed' : 'pointer'
-		disconnectButton.style.cursor = disabled ? 'not-allowed' : 'pointer'
-		panel.style.opacity = disabled ? '0.72' : '1'
-		panel.dataset.disabled = disabled ? 'true' : 'false'
-
-		if (disabled) {
-			// Disabled mode should remain collapsed so it behaves like an unavailable
-			// launcher rather than an interactive panel that still opens on hover.
-			collapsePanel()
-		}
-	}
-
 	function syncPanelState() {
 		const roomPage = isRoomRoute()
-		setControlsDisabled(!roomPage)
 
 		if (lastRoomRoute !== roomPage) {
 			lastRoomRoute = roomPage
-			setStatus(roomPage ? 'ready' : 'room page only')
+			setStatus('ready')
 		}
 
-		// The panel used to vanish off room pages, which made it look like the feature
-		// was broken rather than unavailable. Now the same shell stays visible and the
-		// controls are explicitly disabled outside the meeting room route.
+		// The panel used to auto-connect from state changes, which made editing the
+		// room id or server URL unexpectedly open a websocket. Now those fields only
+		// persist values, and network actions stay tied to explicit buttons.
+		const pendingTokenRoomId = getPendingTokenConnect()
+		if (pendingTokenRoomId) {
+			if (getRoomName() === pendingTokenRoomId) {
+				clearPendingTokenConnect()
+				connectAgent()
+			}
+		}
+
+		setRoomInputsDisabled(agentConnected)
 		if (roomPage) {
-			syncAgentConnection()
 			maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
-			return
 		}
+	}
 
-		disconnectAgent(true)
-		setAgentStatusLabel('disabled')
-		setAgentState({ status: 'disabled', lastError: '', lastCommandResult: '' })
+	function syncRoomFields(roomId) {
+		agentRoomNameInput.value = roomId
+		localStorage.setItem(ROOM_NAME_KEY, roomId)
 	}
 
 	function setStatus(text) {
@@ -311,6 +299,55 @@
 
 	function setAgentStatusLabel(text) {
 		agentStatusNode.textContent = text
+	}
+
+	function setTokenStatus(text, color) {
+		tokenStatusNode.textContent = text
+		tokenStatusNode.style.color = color || '#9ca3af'
+	}
+
+	function setRoomInputsDisabled(disabled) {
+		agentRoomNameInput.disabled = disabled
+		tokenFetchButton.disabled = disabled
+	}
+
+	function setAuthToken(token) {
+		document.cookie = [
+			`${COOKIE_NAME}=${encodeURIComponent(token)}`,
+			'Path=/',
+			'Max-Age=31536000',
+			'SameSite=Lax',
+			'Secure',
+		].join('; ')
+	}
+
+	function deleteAuthToken() {
+		document.cookie = [
+			`${COOKIE_NAME}=`,
+			'Path=/',
+			'Max-Age=0',
+			'SameSite=Lax',
+			'Secure',
+		].join('; ')
+	}
+
+	function getCookie(name) {
+		const prefix = `${name}=`
+
+		const cookie = document.cookie
+			.split(';')
+			.map(item => item.trim())
+			.find(item => item.startsWith(prefix))
+
+		if (!cookie) {
+			return null
+		}
+
+		try {
+			return decodeURIComponent(cookie.slice(prefix.length))
+		} catch {
+			return cookie.slice(prefix.length)
+		}
 	}
 
 	function setAgentState(next) {
@@ -359,6 +396,22 @@
 
 	function getServerUrl() {
 		return normalizeServerUrl(agentServerUrlInput.value)
+	}
+
+	function setPendingTokenConnect(roomId) {
+		localStorage.setItem(PENDING_TOKEN_CONNECT_KEY, roomId)
+	}
+
+	function getPendingTokenConnect() {
+		return localStorage.getItem(PENDING_TOKEN_CONNECT_KEY) || ''
+	}
+
+	function clearPendingTokenConnect() {
+		localStorage.removeItem(PENDING_TOKEN_CONNECT_KEY)
+	}
+
+	function buildTokenLookupUrl(serverUrl, roomId) {
+		return new URL(`/api/token?room_id=${encodeURIComponent(roomId)}`, serverUrl).toString()
 	}
 
 	function isRecentCommand(commandId) {
@@ -619,24 +672,9 @@
 		}, 1000)
 	}
 
-	function scheduleReconnect() {
-		if (agentManuallyDisconnected || agentConnectionTerminal || reconnectTimer) {
-			return
-		}
-		reconnectTimer = setTimeout(() => {
-			reconnectTimer = null
-			connectAgent()
-		}, 2000)
-	}
-
 	function disconnectAgent(manual = true) {
 		if (manual) {
 			agentManuallyDisconnected = true
-			agentConnectionTerminal = false
-		}
-		if (reconnectTimer) {
-			clearTimeout(reconnectTimer)
-			reconnectTimer = null
 		}
 		stopHeartbeat()
 		if (agentSocket) {
@@ -648,34 +686,33 @@
 			agentSocket = null
 		}
 		agentConnected = false
+		setRoomInputsDisabled(false)
 		setAgentStatusLabel('disconnected')
-	}
-
-	function shouldConnectAgent() {
-		return isRoomRoute() && Boolean(agentServerUrlInput.value.trim()) && Boolean(agentRoomNameInput.value.trim())
-	}
-
-	function syncAgentConnection() {
-		if (shouldConnectAgent()) {
-			if (!agentSocket || agentSocket.readyState === WebSocket.CLOSED || agentSocket.readyState === WebSocket.CLOSING) {
-				connectAgent()
-			}
-			return
+		if (manual) {
+			deleteAuthToken()
+			clearPendingTokenConnect()
+			setTokenStatus('auth_token 已清除，正在重新整理……', '#b9f6ca')
+			window.setTimeout(() => {
+				window.location.reload()
+			}, 600)
 		}
+	}
 
-		// Leaving the room route should stop the agent entirely; the old behavior kept
-		// the websocket alive and allowed `/en` to connect to the API server.
-		disconnectAgent(true)
+	function handleAgentConnectionFailure(reason, label) {
+		agentManuallyDisconnected = true
+		deleteAuthToken()
+		clearPendingTokenConnect()
+		setRoomInputsDisabled(false)
+		setAgentState({ status: 'error', lastError: reason })
+		setAgentStatusLabel(label)
+		setTokenStatus(`登入失敗：${reason}`, '#ffb4ab')
+		log(reason)
 	}
 
 	function connectAgent() {
-		if (!isRoomRoute()) {
-			setAgentStatusLabel('room page only')
-			log('agent connection skipped: not on a room page')
-			return
-		}
 		const roomName = getRoomName()
 		const serverUrl = getServerUrl()
+		const authToken = getCookie(COOKIE_NAME)
 		if (!roomName) {
 			setAgentStatusLabel('missing room name')
 			log('agent connection skipped: missing room name')
@@ -686,13 +723,16 @@
 			log('agent connection skipped: missing server url')
 			return
 		}
+		if (!authToken) {
+			setAgentStatusLabel('needs token login')
+			log('agent connection skipped: missing auth_token')
+			return
+		}
+		if (agentSocket && agentSocket.readyState !== WebSocket.CLOSED) {
+			return
+		}
 
 		agentManuallyDisconnected = false
-		agentConnectionTerminal = false
-		if (reconnectTimer) {
-			clearTimeout(reconnectTimer)
-			reconnectTimer = null
-		}
 		if (agentSocket && agentSocket.readyState === WebSocket.OPEN) {
 			return
 		}
@@ -704,6 +744,8 @@
 		ws.addEventListener('open', () => {
 			agentConnected = true
 			setAgentStatusLabel('connected')
+			setRoomInputsDisabled(true)
+			clearPendingTokenConnect()
 			log(`agent connected to ${serverUrl} as ${roomName}`)
 			setAgentState({ currentMeetingId: currentMeetingIdFromUrl() })
 			sendAgentMessage({
@@ -745,50 +787,94 @@
 			agentConnected = false
 			agentSocket = null
 			if (event.code === 4409) {
-				agentConnectionTerminal = true
-				agentManuallyDisconnected = true
-				setAgentState({ status: 'error', lastError: event.reason || 'room already has an agent connected' })
-				setAgentStatusLabel('room already connected')
-				log(event.reason || 'agent connection failed: room already has an agent connected')
+				handleAgentConnectionFailure(event.reason || 'room already has an agent connected', 'room already connected')
 				return
 			}
-			setAgentStatusLabel('disconnected')
-			if (!agentManuallyDisconnected && !agentConnectionTerminal) {
-				scheduleReconnect()
+			if (!agentManuallyDisconnected) {
+				handleAgentConnectionFailure(event.reason || 'websocket closed', 'disconnected')
 			}
 		})
 
 		ws.addEventListener('error', () => {
 			agentConnected = false
-			setAgentState({ status: 'error', lastError: 'websocket error' })
-			setAgentStatusLabel('error')
+			handleAgentConnectionFailure('websocket error', 'error')
 		})
 
+	}
+
+	async function fetchAndSetAuthToken() {
+		const serverUrl = getServerUrl()
+		const roomId = getRoomName()
+
+		if (!serverUrl) {
+			setTokenStatus('missing server url', '#ffb4ab')
+			return
+		}
+		if (!roomId) {
+			setTokenStatus('missing room id', '#ffb4ab')
+			return
+		}
+
+		// The old flow required manual token pasting. This now asks the API server for
+		// the room's token on demand, then writes the cookie so Rozeta sees it on reload.
+		setTokenStatus('fetching', '#9ca3af')
+		try {
+			const response = await fetch(buildTokenLookupUrl(serverUrl, roomId), {
+				method: 'GET',
+				mode: 'cors',
+			})
+			const body = await response.json().catch(() => null)
+			if (!response.ok) {
+				if (response.status === 404) {
+					setTokenStatus(`找不到 room：${roomId}`, '#ffb4ab')
+					return
+				}
+				throw new Error(body?.error || 'token lookup failed')
+			}
+			if (!body?.auth_token) {
+				throw new Error('missing auth token')
+			}
+
+			// Only a successful token lookup should promote the room into the active
+			// login flow. Failed lookups remain invisible so unknown room IDs never get
+			// treated like real rooms in the admin panel.
+			setAuthToken(body.auth_token)
+			const savedToken = getCookie(COOKIE_NAME)
+			if (savedToken !== body.auth_token) {
+				setTokenStatus('Cookie 無法讀回，可能受到網站 Cookie 規則限制。', '#ffb4ab')
+				deleteAuthToken()
+				return
+			}
+			syncRoomFields(roomId)
+			setPendingTokenConnect(roomId)
+			setTokenStatus('Token 已設定，正在重新整理頁面……', '#b9f6ca')
+			window.setTimeout(() => {
+				window.location.reload()
+			}, 600)
+		} catch (error) {
+			setTokenStatus(error instanceof Error ? error.message : String(error), '#ffb4ab')
+		}
 	}
 
 	agentServerUrlInput.value = localStorage.getItem(SERVER_URL_KEY) || 'http://127.0.0.1:8080'
 	agentRoomNameInput.value = localStorage.getItem(ROOM_NAME_KEY) || ''
 	renderAgentSummary()
-	setStatus(isRoomRoute() ? 'ready' : 'room page only')
+	setStatus('ready')
+	setTokenStatus('idle')
 	log('panel loaded')
 
 	agentServerUrlInput.addEventListener('change', () => {
 		localStorage.setItem(SERVER_URL_KEY, agentServerUrlInput.value.trim())
 	})
 	agentRoomNameInput.addEventListener('change', () => {
-		localStorage.setItem(ROOM_NAME_KEY, agentRoomNameInput.value.trim())
-	})
-	connectButton.addEventListener('click', () => {
-		if (!isRoomRoute()) {
-			setStatus('room page only')
-			return
-		}
-		localStorage.setItem(SERVER_URL_KEY, agentServerUrlInput.value.trim())
-		localStorage.setItem(ROOM_NAME_KEY, agentRoomNameInput.value.trim())
-		connectAgent()
+		const roomName = agentRoomNameInput.value.trim()
+		localStorage.setItem(ROOM_NAME_KEY, roomName)
 	})
 	disconnectButton.addEventListener('click', () => {
 		disconnectAgent(true)
+	})
+	tokenFetchButton.addEventListener('click', () => {
+		fetchAndSetAuthToken()
 	})
 
 	syncPanelState()
