@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -21,9 +22,11 @@ import (
 var webAssets embed.FS
 
 type app struct {
-	state      *state
-	tokenStore map[string]string
-	upgrader   websocket.Upgrader
+	state         *state
+	tokenStore    map[string]string
+	rozetaBaseURL string
+	httpClient    *http.Client
+	upgrader      websocket.Upgrader
 }
 
 func main() {
@@ -38,7 +41,11 @@ func main() {
 	}
 
 	a := &app{
-		state: newState(),
+		state:         newState(),
+		rozetaBaseURL: "https://rozeta.app",
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -64,6 +71,7 @@ func main() {
 	router.GET("/api/token", a.handleTokenLookup)
 	router.POST("/api/token", a.handleTokenLookup)
 	router.OPTIONS("/api/token", a.handleTokenLookup)
+	router.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
 	router.POST("/api/rooms/:roomName/commands", a.handleCommand)
 	router.GET("/ws/agent", a.handleAgentWS)
 	router.GET("/ws/admin", a.handleAdminWS)
@@ -134,6 +142,128 @@ func (a *app) handleTokenLookup(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"room_id": roomID, "auth_token": token})
+}
+
+type roomMeetingView struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	Source string `json:"source_language,omitempty"`
+	Target string `json:"target_language,omitempty"`
+}
+
+type roomMeetingsResponse struct {
+	RoomName string            `json:"room_name"`
+	Meetings []roomMeetingView `json:"meetings"`
+}
+
+type rozetaMeetingsPage struct {
+	Data  []rozetaMeeting `json:"data"`
+	Links struct {
+		Next string `json:"next"`
+	} `json:"links"`
+}
+
+type rozetaMeeting struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	HasSummary bool   `json:"has_summary"`
+	Languages  struct {
+		Source string `json:"source"`
+		Target string `json:"target"`
+	} `json:"languages"`
+}
+
+// Admins need a meeting picker for goto commands, but the browser must never see
+// the room auth token. This endpoint keeps the token lookup and the Rozeta fetch
+// server-side, then returns one flattened list so the UI can render all meetings at
+// once without handling pagination itself.
+func (a *app) handleRoomMeetings(c *gin.Context) {
+	roomName := strings.TrimSpace(c.Param("roomName"))
+	if roomName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing room name"})
+		return
+	}
+
+	if a.tokenStore == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "token file not configured"})
+		return
+	}
+
+	token, ok := a.tokenStore[roomName]
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room_name"})
+		return
+	}
+
+	meetings, err := a.fetchRozetaMeetings(token)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, roomMeetingsResponse{
+		RoomName: roomName,
+		Meetings: meetings,
+	})
+}
+
+// Rozeta paginates meetings, but the admin picker needs a single list. We follow
+// the `links.next` chain here and flatten every page before returning to the UI.
+func (a *app) fetchRozetaMeetings(token string) ([]roomMeetingView, error) {
+	client := a.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	baseURL := strings.TrimRight(strings.TrimSpace(a.rozetaBaseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://rozeta.app"
+	}
+
+	meetings := make([]roomMeetingView, 0)
+	nextURL := fmt.Sprintf("%s/api/v1/meetings?page=1", baseURL)
+	for nextURL != "" {
+		req, err := http.NewRequest(http.MethodGet, nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Cookie", "auth_token="+token)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var page rozetaMeetingsPage
+		func() {
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				err = fmt.Errorf("rozeta meetings request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+				return
+			}
+			err = json.NewDecoder(resp.Body).Decode(&page)
+		}()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, meeting := range page.Data {
+			meetings = append(meetings, roomMeetingView{
+				ID:     meeting.ID,
+				Title:  meeting.Title,
+				Status: meeting.Status,
+				Source: meeting.Languages.Source,
+				Target: meeting.Languages.Target,
+			})
+		}
+
+		nextURL = strings.TrimSpace(page.Links.Next)
+	}
+
+	return meetings, nil
 }
 
 type commandRequest struct {

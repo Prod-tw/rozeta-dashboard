@@ -1,6 +1,8 @@
 const state = {
 	rooms: new Map(),
+	roomMeetings: new Map(),
 	selectedRoom: '',
+	meetingsLoadingFor: '',
 	alerts: [],
 	connected: false,
 }
@@ -10,6 +12,8 @@ const selectedRoomInput = document.getElementById('selected-room')
 const selectedRoomLabel = document.getElementById('selected-room-label')
 const targetMeetingInput = document.getElementById('target-meeting')
 const roomDetails = document.getElementById('room-details')
+const roomMeetings = document.getElementById('room-meetings')
+const meetingsStatus = document.getElementById('meetings-status')
 const alertsNode = document.getElementById('alerts')
 const wsStatusNode = document.getElementById('ws-status')
 
@@ -30,10 +34,51 @@ async function loadRooms() {
 	const rooms = await response.json()
 	state.rooms = new Map(rooms.map(room => [room.room_name, room]))
 	if (!state.selectedRoom && rooms[0]) {
-		state.selectedRoom = rooms[0].room_name
-		selectedRoomInput.value = state.selectedRoom
+		selectRoom(rooms[0].room_name, true)
+		return
 	}
 	render()
+}
+
+function selectRoom(roomName, loadMeetings = false) {
+	state.selectedRoom = roomName.trim()
+	selectedRoomInput.value = state.selectedRoom
+	if (loadMeetings && state.selectedRoom) {
+		state.meetingsLoadingFor = state.selectedRoom
+	}
+	render()
+	if (loadMeetings && state.selectedRoom) {
+		void loadRoomMeetings(state.selectedRoom)
+	}
+}
+
+// The room list used to stop at the local agent snapshot. The admin panel now
+// asks the backend for Rozeta meetings after selection so the goto picker stays
+// in sync with the live server-side token lookup.
+async function loadRoomMeetings(roomName) {
+	const trimmedRoomName = roomName.trim()
+	if (!trimmedRoomName) {
+		return
+	}
+
+	state.meetingsLoadingFor = trimmedRoomName
+	renderMeetingList()
+
+	try {
+		const response = await fetch(`/api/rooms/${encodeURIComponent(trimmedRoomName)}/meetings`)
+		const body = await response.json().catch(() => null)
+		if (!response.ok) {
+			throw new Error(body?.error || 'meeting lookup failed')
+		}
+		state.roomMeetings.set(trimmedRoomName, body.meetings || [])
+	} catch (error) {
+		pushAlert('error', error instanceof Error ? error.message : String(error), { room_name: trimmedRoomName })
+	} finally {
+		if (state.meetingsLoadingFor === trimmedRoomName) {
+			state.meetingsLoadingFor = ''
+		}
+		renderMeetingList()
+	}
 }
 
 function connectAdminSocket() {
@@ -114,6 +159,7 @@ function dismissAlert(index) {
 function render() {
 	renderRooms()
 	renderDetails()
+	renderMeetingList()
 	renderAlerts()
 }
 
@@ -137,9 +183,7 @@ function renderRooms() {
 
 	roomsBody.querySelectorAll('tr[data-room]').forEach(row => {
 		row.addEventListener('click', () => {
-			state.selectedRoom = row.dataset.room
-			selectedRoomInput.value = state.selectedRoom
-			render()
+			selectRoom(row.dataset.room, true)
 		})
 	})
 }
@@ -159,6 +203,51 @@ function renderDetails() {
 		`heartbeat age: ${formatHeartbeat(room.heartbeat_age_seconds)}`,
 		`last error: ${room.last_error || '—'}`,
 	].join('\n')
+}
+
+function renderMeetingList() {
+	const roomName = state.selectedRoom
+	const room = state.rooms.get(roomName)
+	if (!roomName || !room) {
+		meetingsStatus.textContent = 'Select a room'
+		roomMeetings.innerHTML = '<div class="meeting-empty">Select a room to load meetings.</div>'
+		return
+	}
+
+	const meetings = state.roomMeetings.get(roomName) || []
+	if (state.meetingsLoadingFor === roomName) {
+		meetingsStatus.textContent = 'Loading meetings...'
+		roomMeetings.innerHTML = '<div class="meeting-empty">Loading meetings from Rozeta.</div>'
+		return
+	}
+
+	meetingsStatus.textContent = `${meetings.length} meetings`
+	if (!meetings.length) {
+		roomMeetings.innerHTML = '<div class="meeting-empty">No meetings found for this room.</div>'
+		return
+	}
+
+	const targetMeetingId = targetMeetingInput.value.trim()
+	roomMeetings.innerHTML = meetings.map(meeting => {
+		const selected = meeting.id === targetMeetingId ? 'selected' : ''
+		const meta = [meeting.id, meeting.status, meeting.source_language || '—', meeting.target_language || '—']
+			.filter(Boolean)
+			.join(' · ')
+		return `
+			<button type="button" class="meeting-item ${selected}" data-meeting-id="${escapeAttr(meeting.id)}">
+				<span class="meeting-title">${escapeHtml(meeting.title || meeting.id)}</span>
+				<span class="meeting-meta">${escapeHtml(meta)}</span>
+			</button>
+		`
+	}).join('')
+
+	roomMeetings.querySelectorAll('[data-meeting-id]').forEach(button => {
+		button.addEventListener('click', () => {
+			targetMeetingInput.value = button.dataset.meetingId
+			render()
+			pushAlert('info', `meeting selected: ${button.dataset.meetingId}`, { room_name: roomName })
+		})
+	})
 }
 
 async function sendCommand(action) {

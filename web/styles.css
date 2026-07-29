@@ -229,6 +229,70 @@ tbody tr.selected {
 	white-space: pre-wrap;
 }
 
+.meeting-list-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 18px;
+	margin-bottom: 10px;
+}
+
+.meeting-list-header h3 {
+	margin: 0;
+	font-size: 16px;
+}
+
+.meeting-list-header span {
+	color: var(--muted);
+	font-size: 0.9rem;
+}
+
+.meeting-list {
+	display: grid;
+	gap: 8px;
+	max-height: 420px;
+	overflow: auto;
+	padding-right: 4px;
+}
+
+.meeting-item {
+	display: grid;
+	gap: 4px;
+	text-align: left;
+	padding: 0.9rem 1rem;
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	background: rgba(255, 255, 255, 0.04);
+	color: var(--text);
+	cursor: pointer;
+}
+
+.meeting-item:hover {
+	background: rgba(255, 255, 255, 0.08);
+}
+
+.meeting-item.selected {
+	border-color: rgba(124, 58, 237, 0.75);
+	background: rgba(124, 58, 237, 0.16);
+}
+
+.meeting-item .meeting-title {
+	font-weight: 600;
+	color: var(--text);
+}
+
+.meeting-item .meeting-meta {
+	color: var(--muted);
+	font-size: 0.9rem;
+	word-break: break-word;
+}
+
+.meeting-empty {
+	color: var(--muted);
+	padding: 0.75rem 0.25rem;
+}
+
 @media (max-width: 980px) {
 	.layout {
 		grid-template-columns: 1fr;
