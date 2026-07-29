@@ -8,7 +8,7 @@
 
 ## Run
 
-- Open the admin UI at `http://localhost:8080` after `go run .`.
+- Open the admin UI at `https://coscup.1li.tw` after `go run .`.
 - Load `rozeta-command-panel.user.js` into Tampermonkey on each always-on room browser.
 - Set the same backend URL and room name in the userscript panel.
 

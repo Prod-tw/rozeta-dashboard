@@ -3,10 +3,10 @@
 // @namespace    https://rozeta.app/
 // @version      0.1.0
 // @description  Small top-right panel to send Rozeta remote-control commands from the meeting room page.
-// @homepageURL  http://localhost:8080/
-// @supportURL   http://localhost:8080/
-// @downloadURL  http://localhost:8080/assets/agent.user.js
-// @updateURL    http://localhost:8080/assets/agent.user.js
+// @homepageURL  https://coscup.1li.tw/
+// @supportURL   https://coscup.1li.tw/
+// @downloadURL  https://coscup.1li.tw/assets/agent.user.js
+// @updateURL    https://coscup.1li.tw/assets/agent.user.js
 // @author       simba
 // @license      MIT
 // @match        https://rozeta.app/en/meetings/*/room*
@@ -901,7 +901,7 @@
 		}
 	}
 
-	agentServerUrlInput.value = localStorage.getItem(SERVER_URL_KEY) || 'http://127.0.0.1:8080'
+	agentServerUrlInput.value = localStorage.getItem(SERVER_URL_KEY) || 'https://coscup.1li.tw'
 	agentRoomNameInput.value = localStorage.getItem(ROOM_NAME_KEY) || ''
 	renderAgentSummary()
 	setStatus('ready')
