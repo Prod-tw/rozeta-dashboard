@@ -27,9 +27,12 @@
 
 	let agentSocket = null
 	let heartbeatTimer = null
+	let reconnectTimer = null
+	let reconnectDelayMs = 1000
 	let agentManuallyDisconnected = false
 	let agentConnected = false
 	let recentCommandIds = []
+	const RECONNECT_DELAY_MAX_MS = 10000
 	let agentState = {
 		status: 'ready',
 		currentMeetingId: '',
@@ -258,6 +261,16 @@
 
 	function syncPanelState() {
 		const roomPage = isRoomRoute()
+		const serverUrl = getServerUrl()
+		const roomName = getRoomName()
+
+		// These logs make it obvious whether auto-connect is being skipped because the
+		// route, room name, or server URL is missing.
+		console.log('[Rozeta Command Panel]', 'syncPanelState', {
+			roomPage,
+			serverUrl: Boolean(serverUrl),
+			roomName: Boolean(roomName),
+		})
 
 		if (lastRoomRoute !== roomPage) {
 			lastRoomRoute = roomPage
@@ -307,8 +320,62 @@
 		tokenFetchButton.disabled = disabled
 	}
 
+	function clearReconnectTimer() {
+		if (!reconnectTimer) {
+			return
+		}
+
+		window.clearTimeout(reconnectTimer)
+		reconnectTimer = null
+	}
+
+	function resetReconnectDelay() {
+		reconnectDelayMs = 1000
+	}
+
+	// Server restarts drop the websocket without changing the page state, so the
+	// agent needs a retry loop here. Before this change, close/error only updated
+	// the UI and the session stayed dead until a manual reload.
+	function scheduleReconnect(reason) {
+		if (agentManuallyDisconnected) {
+			return
+		}
+
+		clearReconnectTimer()
+		setRoomInputsDisabled(false)
+		setAgentState({ status: 'error', lastError: reason })
+		setAgentStatusLabel('reconnecting')
+		setTokenStatus(`重新連線中：${reason}`, '#f59e0b')
+		log(reason)
+
+		const delayMs = reconnectDelayMs
+		reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_DELAY_MAX_MS)
+		reconnectTimer = window.setTimeout(() => {
+			reconnectTimer = null
+			if (!agentManuallyDisconnected) {
+				connectAgent()
+			}
+		}, delayMs)
+		log(`reconnect scheduled in ${Math.round(delayMs / 1000)}s`)
+	}
+
 	function shouldAutoConnect() {
-		return isRoomRoute() && Boolean(getRoomName() && getServerUrl() && getCookie(COOKIE_NAME))
+		const roomPage = isRoomRoute()
+		const roomName = getRoomName()
+		const serverUrl = getServerUrl()
+		// `auth_token` is HttpOnly, so the browser script cannot reliably read it.
+		// The websocket request still carries cookies, so room pages should attempt
+		// to connect whenever the route, room name, and server URL are present.
+		const shouldConnect = roomPage && Boolean(roomName && serverUrl)
+
+		console.log('[Rozeta Command Panel]', 'shouldAutoConnect', {
+			roomPage,
+			roomName: Boolean(roomName),
+			serverUrl: Boolean(serverUrl),
+			shouldConnect,
+		})
+
+		return shouldConnect
 	}
 
 	function setAuthToken(token) {
@@ -632,6 +699,8 @@
 	function disconnectAgent(manual = true) {
 		if (manual) {
 			agentManuallyDisconnected = true
+			clearReconnectTimer()
+			resetReconnectDelay()
 		}
 		stopHeartbeat()
 		if (agentSocket) {
@@ -654,34 +723,46 @@
 		}
 	}
 
-	function handleAgentConnectionFailure(reason, label) {
+	function handleAgentConnectionFailure(reason, label, retryable = true) {
 		setRoomInputsDisabled(false)
 		setAgentState({ status: 'error', lastError: reason })
 		setAgentStatusLabel(label)
-		setTokenStatus(`登入失敗：${reason}`, '#ffb4ab')
-		log(reason)
+		if (!retryable) {
+			clearReconnectTimer()
+			resetReconnectDelay()
+			setTokenStatus(`登入失敗：${reason}`, '#ffb4ab')
+			log(reason)
+			return
+		}
+
+		scheduleReconnect(reason)
 	}
 
 	function connectAgent() {
+		clearReconnectTimer()
 		const roomName = getRoomName()
 		const serverUrl = getServerUrl()
-		const authToken = getCookie(COOKIE_NAME)
+		console.log('[Rozeta Command Panel]', 'connectAgent start', {
+			roomName: Boolean(roomName),
+			serverUrl: Boolean(serverUrl),
+			agentSocketState: agentSocket ? agentSocket.readyState : 'null',
+		})
 		if (!roomName) {
 			setAgentStatusLabel('missing room name')
 			log('agent connection skipped: missing room name')
+			console.log('[Rozeta Command Panel]', 'connectAgent skipped: missing room name')
 			return
 		}
 		if (!serverUrl) {
 			setAgentStatusLabel('missing server url')
 			log('agent connection skipped: missing server url')
-			return
-		}
-		if (!authToken) {
-			setAgentStatusLabel('needs token login')
-			log('agent connection skipped: missing auth_token')
+			console.log('[Rozeta Command Panel]', 'connectAgent skipped: missing server url')
 			return
 		}
 		if (agentSocket && agentSocket.readyState !== WebSocket.CLOSED) {
+			console.log('[Rozeta Command Panel]', 'connectAgent skipped: socket not closed', {
+				readyState: agentSocket.readyState,
+			})
 			return
 		}
 
@@ -693,13 +774,34 @@
 		const ws = new WebSocket(websocketUrlFromServerUrl(serverUrl))
 		agentSocket = ws
 		setAgentStatusLabel('connecting')
+		console.log('[Rozeta Command Panel]', 'connectAgent websocket created', {
+			url: websocketUrlFromServerUrl(serverUrl),
+		})
+		let connectionFailureHandled = false
+
+		const handleConnectionFailureOnce = (reason, label, retryable = true) => {
+			if (connectionFailureHandled) {
+				return
+			}
+			connectionFailureHandled = true
+			stopHeartbeat()
+			agentConnected = false
+			agentSocket = null
+			handleAgentConnectionFailure(reason, label, retryable)
+		}
 
 		ws.addEventListener('open', () => {
+			clearReconnectTimer()
+			resetReconnectDelay()
 			agentConnected = true
 			setAgentStatusLabel('connected')
 			setRoomInputsDisabled(true)
+			setTokenStatus('idle')
+			console.log('[Rozeta Command Panel]', 'websocket open')
 			log(`agent connected to ${serverUrl} as ${roomName}`)
-			setAgentState({ currentMeetingId: currentMeetingIdFromUrl() })
+			// Reconnects should clear the prior failure state so the summary reflects
+			// the live socket again instead of staying stuck on the last error.
+			setAgentState({ currentMeetingId: currentMeetingIdFromUrl(), status: 'connected', lastError: '' })
 			sendAgentMessage({
 				type: 'agent_hello',
 				room_name: roomName,
@@ -735,22 +837,27 @@
 		})
 
 		ws.addEventListener('close', event => {
-			stopHeartbeat()
-			agentConnected = false
-			agentSocket = null
+			console.log('[Rozeta Command Panel]', 'websocket close', {
+				code: event.code,
+				reason: event.reason,
+				wasClean: event.wasClean,
+			})
 			if (event.code === 4409) {
-				handleAgentConnectionFailure(event.reason || 'room already has an agent connected', 'room already connected')
+				// A 4409 close means another agent already owns the room, so retrying
+				// forever would just create noise instead of recovering the connection.
+				console.log('[Rozeta Command Panel]', 'websocket close 4409, stop retrying')
+				handleConnectionFailureOnce(event.reason || 'room already has an agent connected', 'room already connected', false)
 				return
 			}
 			if (!agentManuallyDisconnected) {
-				handleAgentConnectionFailure(event.reason || 'websocket closed', 'disconnected')
+				handleConnectionFailureOnce(event.reason || 'websocket closed', 'disconnected')
 			}
 		})
 
 		ws.addEventListener('error', () => {
-			agentConnected = false
+			console.log('[Rozeta Command Panel]', 'websocket error')
 			if (!agentManuallyDisconnected) {
-				handleAgentConnectionFailure('websocket error', 'error')
+				handleConnectionFailureOnce('websocket error', 'error')
 			}
 		})
 
