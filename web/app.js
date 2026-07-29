@@ -6,7 +6,6 @@ const state = {
 	alerts: [],
 	alertTimers: new Map(),
 	nextAlertId: 0,
-	connected: false,
 }
 
 const roomsBody = document.getElementById('rooms-body')
@@ -77,10 +76,6 @@ function resolveCurrentMeetingName(room) {
 	return meetingTitle || meetingId
 }
 
-function formatMeetingReference(room) {
-	return resolveCurrentMeetingName(room)
-}
-
 function clearAlertTimer(alertId) {
 	const timer = state.alertTimers.get(alertId)
 	if (timer) {
@@ -117,10 +112,6 @@ function removeErrorAlertsForRoom(roomName) {
 		removeAlert(alert.id, false)
 	}
 	return true
-}
-
-function dismissAlert(alertId) {
-	removeAlert(alertId)
 }
 
 function scheduleInfoAlertDismiss(alert) {
@@ -166,11 +157,9 @@ function connectAdminSocket() {
 	const ws = new WebSocket(`${location.origin.replace(/^http/, 'ws')}/ws/admin`)
 	wsStatusNode.textContent = 'connecting'
 	ws.addEventListener('open', () => {
-		state.connected = true
 		wsStatusNode.textContent = 'connected'
 	})
 	ws.addEventListener('close', () => {
-		state.connected = false
 		wsStatusNode.textContent = 'disconnected'
 		setTimeout(connectAdminSocket, 2000)
 	})

@@ -137,10 +137,6 @@
 		return /^\/en\/meetings\/[^/]+\/room/.test(location.pathname)
 	}
 
-	function shouldShowPanel() {
-		return true
-	}
-
 	function getPanelHost() {
 		return document.body || document.documentElement
 	}
@@ -161,19 +157,8 @@
 		return true
 	}
 
-	function unmountPanel() {
-		if (panel.isConnected) {
-			panel.remove()
-		}
-	}
-
 	function syncPanelMount() {
-		if (shouldShowPanel()) {
-			mountPanel()
-			return
-		}
-
-		unmountPanel()
+		mountPanel()
 	}
 
 	function startRouteWatcher() {

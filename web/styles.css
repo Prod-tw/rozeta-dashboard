@@ -37,10 +37,6 @@ button {
 	cursor: pointer;
 }
 
-button.primary {
-	background: var(--accent);
-}
-
 .app-shell {
 	max-width: 1400px;
 	margin: 0 auto;

@@ -67,23 +67,6 @@ func loadMeetingNames(path string) (map[string]string, error) {
 	return mapping, nil
 }
 
-func (s *state) ensureRoom(roomName string) *roomState {
-	roomName = strings.TrimSpace(roomName)
-	if roomName == "" {
-		return &roomState{}
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	room, ok := s.rooms[roomName]
-	if !ok {
-		room = &roomState{roomName: roomName, status: "ready", updatedAt: time.Now().UTC()}
-		s.rooms[roomName] = room
-	}
-	return room
-}
-
 func (s *state) issueCommand(roomName, action, targetMeetingID string) (command, *roomState) {
 	now := time.Now().UTC()
 	roomName = strings.TrimSpace(roomName)
@@ -200,16 +183,6 @@ func (s *state) snapshotRooms() []roomView {
 		return views[i].RoomName < views[j].RoomName
 	})
 	return views
-}
-
-func (s *state) snapshotRoom(roomName string) roomView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if room, ok := s.rooms[roomName]; ok {
-		return room.snapshotLocked(s.meetingNames)
-	}
-	return roomView{RoomName: roomName, Status: "ready"}
 }
 
 func (s *state) broadcastAgents(data []byte) {
