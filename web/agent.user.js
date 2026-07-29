@@ -3,6 +3,12 @@
 // @namespace    https://rozeta.app/
 // @version      0.1.0
 // @description  Small top-right panel to send Rozeta remote-control commands from the meeting room page.
+// @homepageURL  http://localhost:8080/
+// @supportURL   http://localhost:8080/
+// @downloadURL  http://localhost:8080/assets/agent.user.js
+// @updateURL    http://localhost:8080/assets/agent.user.js
+// @author       simba
+// @license      MIT
 // @match        https://rozeta.app/en/meetings/*/room*
 // @match        https://rozeta.app/*
 // @run-at       document-end
