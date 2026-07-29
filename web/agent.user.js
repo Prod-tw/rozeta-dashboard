@@ -21,9 +21,7 @@
 	const PANEL_ID = 'rozeta-command-panel'
 	const SERVER_URL_KEY = 'rozeta-agent-server-url'
 	const ROOM_NAME_KEY = 'rozeta-agent-room-name'
-	const PENDING_TOKEN_CONNECT_KEY = 'rozeta-token-pending-connect'
 	const AGENT_ID_KEY = 'rozeta-agent-id'
-	const PENDING_AUTO_START_KEY = 'rozeta-command-panel-pending-auto-start'
 	const COOKIE_NAME = 'auth_token'
 	const RECENT_COMMAND_LIMIT = 50
 
@@ -266,21 +264,13 @@
 			setStatus('ready')
 		}
 
-		// The panel used to auto-connect from state changes, which made editing the
-		// room id or server URL unexpectedly open a websocket. Now those fields only
-		// persist values, and network actions stay tied to explicit buttons.
-		const pendingTokenRoomId = getPendingTokenConnect()
-		if (pendingTokenRoomId) {
-			if (getRoomName() === pendingTokenRoomId) {
-				clearPendingTokenConnect()
+		if (roomPage) {
+			if (shouldAutoConnect()) {
 				connectAgent()
 			}
 		}
 
 		setRoomInputsDisabled(agentConnected)
-		if (roomPage) {
-			maybeTriggerPendingAutoStart().catch(error => log(error instanceof Error ? error.message : String(error)))
-		}
 	}
 
 	function syncRoomFields(roomId) {
@@ -315,6 +305,10 @@
 	function setRoomInputsDisabled(disabled) {
 		agentRoomNameInput.disabled = disabled
 		tokenFetchButton.disabled = disabled
+	}
+
+	function shouldAutoConnect() {
+		return isRoomRoute() && Boolean(getRoomName() && getServerUrl() && getCookie(COOKIE_NAME))
 	}
 
 	function setAuthToken(token) {
@@ -402,18 +396,6 @@
 
 	function getServerUrl() {
 		return normalizeServerUrl(agentServerUrlInput.value)
-	}
-
-	function setPendingTokenConnect(roomId) {
-		localStorage.setItem(PENDING_TOKEN_CONNECT_KEY, roomId)
-	}
-
-	function getPendingTokenConnect() {
-		return localStorage.getItem(PENDING_TOKEN_CONNECT_KEY) || ''
-	}
-
-	function clearPendingTokenConnect() {
-		localStorage.removeItem(PENDING_TOKEN_CONNECT_KEY)
 	}
 
 	function buildTokenLookupUrl(serverUrl, roomId) {
@@ -560,36 +542,6 @@
 		log('pause state confirmed')
 	}
 
-	function setPendingAutoStart(meetingId) {
-		localStorage.setItem(PENDING_AUTO_START_KEY, meetingId)
-	}
-
-	function clearPendingAutoStart() {
-		localStorage.removeItem(PENDING_AUTO_START_KEY)
-	}
-
-	function getPendingAutoStart() {
-		return localStorage.getItem(PENDING_AUTO_START_KEY) || ''
-	}
-
-	async function maybeTriggerPendingAutoStart() {
-		const pendingMeetingId = getPendingAutoStart()
-		const currentMeetingId = currentMeetingIdFromUrl()
-		if (!pendingMeetingId || !currentMeetingId || pendingMeetingId !== currentMeetingId) {
-			return
-		}
-
-		clearPendingAutoStart()
-		log(`pending auto-start matched URL: ${currentMeetingId}`)
-		setTimeout(() => {
-			clickStartButtonDom()
-				.then(() => {
-					setAgentState({ status: 'in_progress', lastCommandResult: 'started', currentMeetingId: currentMeetingIdFromUrl() })
-				})
-				.catch(error => log(error instanceof Error ? error.message : String(error)))
-		}, 800)
-	}
-
 	async function gotoMeetingByUrl(meetingId) {
 		if (!meetingId) {
 			throw new Error('missing meeting id')
@@ -598,7 +550,12 @@
 		const nextUrl = roomUrlForMeetingId(meetingId)
 		log(`navigating to ${nextUrl}`)
 		setStatus('navigating')
-		location.href = nextUrl
+		history.pushState({ meetingId }, '', nextUrl)
+		window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }))
+		// `goto` now stays inside the same document, so the websocket remains live and
+		// the agent can report the new meeting immediately without a reconnect cycle.
+		setAgentState({ currentMeetingId: currentMeetingIdFromUrl(), status: 'connected' })
+		setStatus('ready')
 	}
 
 	// The server now broadcasts `command` envelopes to agents, so the browser-side
@@ -617,7 +574,7 @@
 			case 'goto':
 				setAgentState({ status: 'switching' })
 				await gotoMeetingByUrl(command.target_meeting_id)
-				setAgentState({ lastCommandResult: 'done' })
+				setAgentState({ lastCommandResult: 'done', status: 'connected' })
 				return
 			case 'start':
 				setAgentState({ status: 'in_progress' })
@@ -628,12 +585,6 @@
 				setAgentState({ status: 'paused' })
 				await clickPauseButtonDom()
 				setAgentState({ lastCommandResult: 'paused', status: 'paused' })
-				return
-			case 'goto_and_start':
-				setAgentState({ status: 'switching' })
-				setPendingAutoStart(command.target_meeting_id)
-				await gotoMeetingByUrl(command.target_meeting_id)
-				setAgentState({ lastCommandResult: 'navigating' })
 				return
 			default:
 				setAgentState({ lastCommandResult: 'ignored' })
@@ -696,7 +647,6 @@
 		setAgentStatusLabel('disconnected')
 		if (manual) {
 			deleteAuthToken()
-			clearPendingTokenConnect()
 			setTokenStatus('auth_token 已清除，正在重新整理……', '#b9f6ca')
 			window.setTimeout(() => {
 				window.location.reload()
@@ -705,9 +655,6 @@
 	}
 
 	function handleAgentConnectionFailure(reason, label) {
-		agentManuallyDisconnected = true
-		deleteAuthToken()
-		clearPendingTokenConnect()
 		setRoomInputsDisabled(false)
 		setAgentState({ status: 'error', lastError: reason })
 		setAgentStatusLabel(label)
@@ -751,7 +698,6 @@
 			agentConnected = true
 			setAgentStatusLabel('connected')
 			setRoomInputsDisabled(true)
-			clearPendingTokenConnect()
 			log(`agent connected to ${serverUrl} as ${roomName}`)
 			setAgentState({ currentMeetingId: currentMeetingIdFromUrl() })
 			sendAgentMessage({
@@ -803,7 +749,9 @@
 
 		ws.addEventListener('error', () => {
 			agentConnected = false
-			handleAgentConnectionFailure('websocket error', 'error')
+			if (!agentManuallyDisconnected) {
+				handleAgentConnectionFailure('websocket error', 'error')
+			}
 		})
 
 	}
@@ -842,8 +790,8 @@
 			}
 
 			// Only a successful token lookup should promote the room into the active
-			// login flow. Failed lookups remain invisible so unknown room IDs never get
-			// treated like real rooms in the admin panel.
+			// login flow. The page reload now reconnects from the durable cookie, so we
+			// no longer need a separate pending-connect handoff.
 			setAuthToken(body.auth_token)
 			const savedToken = getCookie(COOKIE_NAME)
 			if (savedToken !== body.auth_token) {
@@ -852,7 +800,6 @@
 				return
 			}
 			syncRoomFields(roomId)
-			setPendingTokenConnect(roomId)
 			setTokenStatus('Token 已設定，正在重新整理頁面……', '#b9f6ca')
 			window.setTimeout(() => {
 				window.location.reload()

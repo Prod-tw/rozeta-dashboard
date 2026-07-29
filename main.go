@@ -271,6 +271,15 @@ type commandRequest struct {
 	TargetMeetingID string `json:"target_meeting_id"`
 }
 
+func isSupportedCommandAction(action string) bool {
+	switch strings.TrimSpace(action) {
+	case "goto", "start", "pause":
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *app) handleCommand(c *gin.Context) {
 	roomName := strings.TrimSpace(c.Param("roomName"))
 	if roomName == "" {
@@ -288,6 +297,13 @@ func (a *app) handleCommand(c *gin.Context) {
 	req.TargetMeetingID = strings.TrimSpace(req.TargetMeetingID)
 	if req.Action == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing action"})
+		return
+	}
+	if !isSupportedCommandAction(req.Action) {
+		// The command surface is intentionally small so navigation stays separate from
+		// playback. Before this check, old composite actions could still be accepted by
+		// the backend even after the UI stopped exposing them.
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported action"})
 		return
 	}
 

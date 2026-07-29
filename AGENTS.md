@@ -23,6 +23,6 @@
 - Heartbeats are sent every 1 second, and rooms are marked lost after 3 seconds without one.
 - Room claims are exclusive: the server rejects a second agent for the same room with websocket close code `4409`.
 - Commands are broadcast to all agents, but each agent only executes messages for its own room name.
-- Supported commands are `goto`, `start`, `pause`, and `goto_and_start`.
+- Supported commands are `goto`, `start`, and `pause`.
 - `meeting-names.json` in the repo root is optional and maps meeting IDs to display names.
-- `goto_and_start` is the preferred flow when switching meetings and resuming capture.
+- Use `goto` first, then `start` after the room finishes loading.

@@ -58,7 +58,6 @@ Supported actions:
 - `goto`
 - `start`
 - `pause`
-- `goto_and_start`
 
 ## DOM Execution
 
@@ -67,7 +66,10 @@ The userscript uses direct URL navigation and DOM interaction.
 - `goto` changes the meeting URL.
 - `start` clicks the play/start control.
 - `pause` clicks the pause control.
-- `goto_and_start` waits for the new room DOM and then starts.
+
+The old combined `goto_and_start` flow was removed so navigation and playback stay
+independent. A room reload now reconnects the agent from the persisted cookie,
+which keeps page transitions from surfacing as errors.
 
 ## Admin UI
 

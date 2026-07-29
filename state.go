@@ -110,8 +110,10 @@ func (s *state) issueCommand(roomName, action, targetMeetingID string) (command,
 	room.lastError = ""
 	room.updatedAt = now
 
+	// Navigation and playback are now separate actions. The backend only records
+	// the explicit commands still exposed in the admin UI.
 	switch action {
-	case "goto", "goto_and_start":
+	case "goto":
 		room.status = "switching"
 	case "start":
 		room.status = "in_progress"
