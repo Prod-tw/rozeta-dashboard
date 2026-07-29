@@ -76,29 +76,83 @@ button.primary {
 .alerts {
 	display: grid;
 	gap: 10px;
+}
+
+.alert-panel {
 	margin-bottom: 16px;
 }
 
 .alert {
-	display: block;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: start;
+	gap: 12px;
 	width: 100%;
 	padding: 12px 14px;
 	border-radius: 12px;
-	background: rgba(239, 68, 68, 0.16);
-	border: 1px solid rgba(239, 68, 68, 0.35);
+	background: rgba(59, 130, 246, 0.14);
+	border: 1px solid rgba(59, 130, 246, 0.32);
 	color: var(--text);
 	text-align: left;
+}
+
+.alert.error {
+	background: rgba(239, 68, 68, 0.16);
+	border-color: rgba(239, 68, 68, 0.35);
 	cursor: pointer;
 }
 
-.alert:hover {
+.alert.error:hover {
 	background: rgba(239, 68, 68, 0.24);
 	border-color: rgba(239, 68, 68, 0.5);
 }
 
-.alert:focus-visible {
+.alert.error:focus-visible {
 	outline: 2px solid rgba(196, 181, 253, 0.9);
 	outline-offset: 2px;
+}
+
+.alert-copy {
+	display: grid;
+	gap: 6px;
+	min-width: 0;
+}
+
+.alert-level {
+	font-size: 0.78rem;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--muted);
+}
+
+.alert.error .alert-level {
+	color: #fca5a5;
+}
+
+.alert.info .alert-level {
+	color: #93c5fd;
+}
+
+.alert-room {
+	font-weight: 600;
+}
+
+.alert-copy p {
+	margin: 0;
+	word-break: break-word;
+}
+
+.alert-dismiss {
+	padding: 0.45rem 0.7rem;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.08);
+	color: var(--text);
+	white-space: nowrap;
+}
+
+.alert-empty {
+	color: var(--muted);
+	padding: 2px 2px 0;
 }
 
 .layout {

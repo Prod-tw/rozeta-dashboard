@@ -4,6 +4,8 @@ const state = {
 	selectedRoom: '',
 	meetingsLoadingFor: '',
 	alerts: [],
+	alertTimers: new Map(),
+	nextAlertId: 0,
 	connected: false,
 }
 
@@ -50,6 +52,74 @@ function selectRoom(roomName, loadMeetings = false) {
 	if (loadMeetings && state.selectedRoom) {
 		void loadRoomMeetings(state.selectedRoom)
 	}
+}
+
+function normalizeRoomName(roomName) {
+	return String(roomName || '').trim()
+}
+
+function formatMeetingReference(room) {
+	// The room table used to show only the raw meeting ID or a separate name field,
+	// which made the left pane harder to scan. We now show the resolved name first
+	// and keep the ID as a fallback when no mapping exists.
+	const meetingName = String(room?.current_meeting_name || '').trim()
+	const meetingId = String(room?.current_meeting_id || '').trim()
+	if (meetingName && meetingId) {
+		return `${meetingName} (${meetingId})`
+	}
+	return meetingName || meetingId || '—'
+}
+
+function clearAlertTimer(alertId) {
+	const timer = state.alertTimers.get(alertId)
+	if (timer) {
+		window.clearTimeout(timer)
+		state.alertTimers.delete(alertId)
+	}
+}
+
+function removeAlert(alertId, rerender = true) {
+	const index = state.alerts.findIndex(alert => alert.id === alertId)
+	if (index < 0) {
+		return false
+	}
+	clearAlertTimer(alertId)
+	state.alerts.splice(index, 1)
+	if (rerender) {
+		renderAlerts()
+	}
+	return true
+}
+
+function removeErrorAlertsForRoom(roomName) {
+	const normalizedRoomName = normalizeRoomName(roomName)
+	if (!normalizedRoomName) {
+		return false
+	}
+
+	const errorAlerts = state.alerts.filter(alert => alert.level === 'error' && alert.room_name === normalizedRoomName)
+	if (!errorAlerts.length) {
+		return false
+	}
+
+	for (const alert of errorAlerts) {
+		removeAlert(alert.id, false)
+	}
+	return true
+}
+
+function dismissAlert(alertId) {
+	removeAlert(alertId)
+}
+
+function scheduleInfoAlertDismiss(alert) {
+	// Info alerts used to pile up in the shared stack, which made the admin page noisy.
+	// The old behavior kept them until another render displaced them; the new behavior
+	// expires these messages automatically after a short delay.
+	const timer = window.setTimeout(() => {
+		removeAlert(alert.id)
+	}, 5000)
+	state.alertTimers.set(alert.id, timer)
 }
 
 // The room list used to stop at the local agent snapshot. The admin panel now
@@ -112,11 +182,22 @@ function handleMessage(message) {
 	switch (message.type) {
 		case 'snapshot':
 			state.rooms = new Map((message.rooms || []).map(room => [room.room_name, room]))
+			// Room-scoped errors used to linger even after the room had recovered, because
+			// the old snapshot flow only refreshed the table. We now clear those stale error
+			// alerts before rendering the recovered room state.
+			for (const room of message.rooms || []) {
+				if (room?.room_name && room.status !== 'lost') {
+					removeErrorAlertsForRoom(room.room_name)
+				}
+			}
 			render()
 			break
 		case 'room_snapshot':
 			if (message.room?.room_name) {
 				state.rooms.set(message.room.room_name, message.room)
+				if (message.room.status !== 'lost') {
+					removeErrorAlertsForRoom(message.room.room_name)
+				}
 				render()
 			}
 			break
@@ -131,29 +212,77 @@ function handleMessage(message) {
 }
 
 function pushAlert(level, message, room) {
-	state.alerts.unshift({ level, message, room, at: new Date() })
-	state.alerts = state.alerts.slice(0, 5)
+	const normalizedLevel = level === 'info' ? 'info' : 'error'
+	const roomName = normalizeRoomName(room?.room_name)
+	if (normalizedLevel === 'error' && roomName) {
+		removeErrorAlertsForRoom(roomName)
+	}
+
+	const alert = {
+		id: ++state.nextAlertId,
+		level: normalizedLevel,
+		message,
+		room_name: roomName,
+	}
+	state.alerts.unshift(alert)
+	if (normalizedLevel === 'info') {
+		scheduleInfoAlertDismiss(alert)
+	}
 	renderAlerts()
 }
 
 function renderAlerts() {
-	alertsNode.innerHTML = state.alerts.map((alert, index) => {
-		const roomLabel = alert.room?.room_name ? `<strong>${escapeHtml(alert.room.room_name)}</strong>: ` : ''
-		return `<button type="button" class="alert" data-alert-index="${index}" title="Click to dismiss">${roomLabel}${escapeHtml(alert.message)}</button>`
+	if (!state.alerts.length) {
+		alertsNode.innerHTML = '<div class="alert-empty">No active alerts.</div>'
+		return
+	}
+
+	const alerts = [
+		...state.alerts.filter(alert => alert.level === 'error'),
+		...state.alerts.filter(alert => alert.level === 'info'),
+	]
+
+	alertsNode.innerHTML = alerts.map(alert => {
+		const roomLabel = alert.room_name ? `<span class="alert-room">${escapeHtml(alert.room_name)}</span>` : ''
+		const dismissButton = alert.level === 'error'
+			? `<button type="button" class="alert-dismiss" data-alert-dismiss="${alert.id}">Dismiss</button>`
+			: ''
+		const clickableAttrs = alert.level === 'error' ? ` role="button" tabindex="0" data-alert-id="${alert.id}"` : ''
+		return `
+			<article class="alert ${escapeHtml(alert.level)}"${clickableAttrs}>
+				<div class="alert-copy">
+					<span class="alert-level">${escapeHtml(alert.level)}</span>
+					${roomLabel}
+					<p>${escapeHtml(alert.message)}</p>
+				</div>
+				${dismissButton}
+			</article>
+		`
 	}).join('')
 
-	// Alerts used to stay visible until another render replaced them; clicking now dismisses only the chosen alert.
-	alertsNode.querySelectorAll('[data-alert-index]').forEach(alertNode => {
-		alertNode.addEventListener('click', () => dismissAlert(Number(alertNode.dataset.alertIndex)))
+	alertsNode.querySelectorAll('[data-alert-id]').forEach(alertNode => {
+		alertNode.addEventListener('click', () => dismissAlert(Number(alertNode.dataset.alertId)))
+		alertNode.addEventListener('keydown', event => {
+			if (event.key === 'Enter' || event.key === ' ') {
+				event.preventDefault()
+				dismissAlert(Number(alertNode.dataset.alertId))
+			}
+		})
+	})
+
+	alertsNode.querySelectorAll('[data-alert-dismiss]').forEach(alertNode => {
+		alertNode.addEventListener('click', event => {
+			event.stopPropagation()
+			dismissAlert(Number(alertNode.dataset.alertDismiss))
+		})
 	})
 }
 
-function dismissAlert(index) {
-	if (!Number.isInteger(index) || index < 0 || index >= state.alerts.length) {
+function dismissAlert(alertId) {
+	if (!Number.isInteger(alertId)) {
 		return
 	}
-	state.alerts.splice(index, 1)
-	renderAlerts()
+	removeAlert(alertId)
 }
 
 function render() {
@@ -171,11 +300,12 @@ function renderRooms() {
 	}
 	roomsBody.innerHTML = rooms.map(room => {
 		const selected = room.room_name === state.selectedRoom ? 'selected' : ''
+		const meetingReference = formatMeetingReference(room)
 		return `
 			<tr class="${selected}" data-room="${escapeAttr(room.room_name)}">
 				<td>${escapeHtml(room.room_name)}</td>
 				<td><span class="status ${escapeHtml(room.status || 'ready')}">${escapeHtml(room.status || 'ready')}</span></td>
-				<td>${escapeHtml(room.current_meeting_name || room.current_meeting_id || '—')}</td>
+				<td>${escapeHtml(meetingReference)}</td>
 				<td>${formatHeartbeat(room.heartbeat_age_seconds)}</td>
 			</tr>
 		`
@@ -245,6 +375,8 @@ function renderMeetingList() {
 		button.addEventListener('click', () => {
 			targetMeetingInput.value = button.dataset.meetingId
 			render()
+			// Meeting selection is quick feedback, so it now goes through the transient
+			// info channel instead of the persistent error stack used for room failures.
 			pushAlert('info', `meeting selected: ${button.dataset.meetingId}`, { room_name: roomName })
 		})
 	})
