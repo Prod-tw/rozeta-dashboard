@@ -58,16 +58,27 @@ function normalizeRoomName(roomName) {
 	return String(roomName || '').trim()
 }
 
-function formatMeetingReference(room) {
-	// The room table used to show only the raw meeting ID or a separate name field,
-	// which made the left pane harder to scan. We now show the resolved name first
-	// and keep the ID as a fallback when no mapping exists.
-	const meetingName = String(room?.current_meeting_name || '').trim()
+function resolveCurrentMeetingName(room) {
+	// The admin snapshot only knows the meeting ID unless the backend has an explicit
+	// name mapping. We now resolve the human-readable title from the loaded meeting
+	// list first, then fall back to the backend mapping, and finally to the ID.
 	const meetingId = String(room?.current_meeting_id || '').trim()
-	if (meetingName && meetingId) {
-		return `${meetingName} (${meetingId})`
+	const mappedMeetingName = String(room?.current_meeting_name || '').trim()
+	if (mappedMeetingName) {
+		return mappedMeetingName
 	}
-	return meetingName || meetingId || '—'
+	if (!meetingId) {
+		return '—'
+	}
+
+	const meetings = state.roomMeetings.get(room?.room_name || '') || []
+	const meeting = meetings.find(item => String(item?.id || '').trim() === meetingId)
+	const meetingTitle = String(meeting?.title || '').trim()
+	return meetingTitle || meetingId
+}
+
+function formatMeetingReference(room) {
+	return resolveCurrentMeetingName(room)
 }
 
 function clearAlertTimer(alertId) {
@@ -329,7 +340,7 @@ function renderDetails() {
 		`room: ${room.room_name}`,
 		`status: ${room.status || 'ready'}`,
 		`meeting id: ${room.current_meeting_id || '—'}`,
-		`meeting name: ${room.current_meeting_name || '—'}`,
+		`meeting name: ${resolveCurrentMeetingName(room)}`,
 		`heartbeat age: ${formatHeartbeat(room.heartbeat_age_seconds)}`,
 		`last error: ${room.last_error || '—'}`,
 	].join('\n')
