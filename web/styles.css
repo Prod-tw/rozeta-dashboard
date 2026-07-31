@@ -79,15 +79,18 @@ button.loading::after {
 	}
 }
 
+/* The layout previously started with desktop dimensions and compressed them at max-width breakpoints. Mobile is now
+   the baseline so narrow screens get the intended reading order and touch spacing before larger layouts opt in. */
 .app-shell {
 	max-width: 1400px;
 	margin: 0 auto;
-	padding: 24px;
+	padding: 14px;
 }
 
 .topbar {
 	display: flex;
-	align-items: flex-start;
+	align-items: stretch;
+	flex-direction: column;
 	justify-content: space-between;
 	gap: 16px;
 	margin-bottom: 16px;
@@ -95,7 +98,7 @@ button.loading::after {
 
 .topbar h1 {
 	margin: 0;
-	font-size: 28px;
+	font-size: 24px;
 }
 
 .topbar p {
@@ -114,6 +117,7 @@ button.loading::after {
 .topbar-actions {
 	display: flex;
 	align-items: center;
+	justify-content: space-between;
 	gap: 8px;
 }
 
@@ -167,7 +171,7 @@ button.loading::after {
 .alerts {
 	display: grid;
 	gap: 10px;
-	max-height: calc(100dvh - 32px);
+	max-height: min(48dvh, calc(100dvh - 28px - env(safe-area-inset-bottom)));
 	padding: 2px;
 	overflow-y: auto;
 	overscroll-behavior: contain;
@@ -179,10 +183,11 @@ button.loading::after {
    stack keeps the dashboard stable while a bounded scroll area prevents persistent errors from covering the page. */
 .notifications {
 	position: fixed;
-	top: max(16px, env(safe-area-inset-top));
-	right: max(16px, env(safe-area-inset-right));
+	top: max(14px, env(safe-area-inset-top));
+	right: max(14px, env(safe-area-inset-right));
+	left: max(14px, env(safe-area-inset-left));
 	z-index: 40;
-	width: min(400px, calc(100vw - 32px));
+	width: auto;
 	pointer-events: none;
 }
 
@@ -261,15 +266,15 @@ button.loading::after {
 
 .layout {
 	display: grid;
-	grid-template-columns: 1.4fr 0.9fr;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 16px;
 }
 
 .panel {
 	background: rgba(16, 26, 46, 0.9);
 	border: 1px solid var(--line);
-	border-radius: 20px;
-	padding: 16px;
+	border-radius: 16px;
+	padding: 14px;
 	backdrop-filter: blur(12px);
 }
 
@@ -287,8 +292,30 @@ button.loading::after {
 }
 
 .panel-header-actions {
-	display: flex;
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 8px;
+}
+
+.room-list-panel .panel-header,
+.command-panel .panel-header {
+	align-items: stretch;
+	flex-direction: column;
+}
+
+.command-panel {
+	scroll-margin-top: 14px;
+}
+
+#command-panel-title:focus-visible {
+	outline: 2px solid rgba(196, 181, 253, 0.9);
+	outline-offset: 4px;
+}
+
+#selected-room-label {
+	min-width: 0;
+	color: var(--muted);
+	overflow-wrap: anywhere;
 }
 
 .room-visibility-summary {
@@ -299,20 +326,62 @@ button.loading::after {
 }
 
 .table-wrap {
+	max-height: 42dvh;
 	overflow: auto;
+	overscroll-behavior: contain;
+	border-block: 1px solid var(--line);
 }
 
 table {
 	width: 100%;
+	table-layout: fixed;
 	border-collapse: collapse;
 }
 
 th,
 td {
 	text-align: left;
-	padding: 12px 10px;
+	padding: 10px 6px;
 	border-bottom: 1px solid var(--line);
 	vertical-align: top;
+}
+
+thead th {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	background: #101a2e;
+	color: var(--muted);
+	font-size: 0.75rem;
+}
+
+th:first-child,
+#rooms-body td:first-child:not([colspan]) {
+	width: 40%;
+	overflow-wrap: anywhere;
+}
+
+th:nth-child(2),
+#rooms-body td:nth-child(2),
+th:nth-child(3),
+#rooms-body td:nth-child(3) {
+	width: 30%;
+}
+
+/* Mobile previously squeezed all five columns into a horizontal scroller. Keep the three operational fields visible;
+   the selected room's full meeting and sync details remain available immediately below in the command panel. */
+th:nth-child(4),
+#rooms-body td:nth-child(4),
+th:nth-child(5),
+#rooms-body td:nth-child(5) {
+	display: none;
+}
+
+/* The last-sync timestamp previously wrapped into several short lines on narrow screens. Keep meaningful timestamps
+   intact and let the existing table wrapper scroll horizontally instead; colspan empty states remain free to wrap. */
+thead th:last-child,
+#rooms-body td:last-child:not([colspan]) {
+	white-space: nowrap;
 }
 
 tbody tr {
@@ -336,11 +405,13 @@ tbody tr:focus-visible {
 	display: inline-flex;
 	align-items: center;
 	gap: 8px;
-	padding: 0.3rem 0.7rem;
+	padding: 0.25rem 0.45rem;
 	border-radius: 999px;
-	font-size: 0.85rem;
+	font-size: 0.75rem;
 	text-transform: uppercase;
 	letter-spacing: 0.04em;
+	/* Status text previously wrapped inside the pill when table width was constrained. Preserve the pill as one unit. */
+	white-space: nowrap;
 }
 
 .status.ready,
@@ -428,7 +499,37 @@ tbody tr:focus-visible {
 .details {
 	color: var(--muted);
 	line-height: 1.6;
-	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.detail-list {
+	display: grid;
+	gap: 0;
+	margin: 0;
+	border-block: 1px solid var(--line);
+}
+
+.detail-row {
+	display: grid;
+	grid-template-columns: minmax(5.5rem, 0.4fr) minmax(0, 1fr);
+	gap: 12px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--line);
+}
+
+.detail-row:last-child {
+	border-bottom: 0;
+}
+
+.detail-row dt {
+	color: var(--muted);
+}
+
+.detail-row dd {
+	min-width: 0;
+	margin: 0;
+	color: var(--text);
+	overflow-wrap: anywhere;
 }
 
 .meeting-list-header {
@@ -453,9 +554,6 @@ tbody tr:focus-visible {
 .meeting-list {
 	display: grid;
 	gap: 8px;
-	max-height: 420px;
-	overflow: auto;
-	padding-right: 4px;
 }
 
 .meeting-item {
@@ -482,6 +580,7 @@ tbody tr:focus-visible {
 .meeting-item .meeting-title {
 	font-weight: 600;
 	color: var(--text);
+	overflow-wrap: anywhere;
 }
 
 .meeting-item .meeting-meta {
@@ -495,8 +594,12 @@ tbody tr:focus-visible {
 	padding: 0.75rem 0.25rem;
 }
 
+/* Dialogs previously relied on desktop sizing, which could push controls outside short or notched mobile viewports.
+   Bound both axes by safe areas and keep each dialog's actionable content inside its own scroll region. */
 dialog {
+	width: min(520px, calc(100% - 28px - env(safe-area-inset-left) - env(safe-area-inset-right)));
 	max-width: 520px;
+	max-height: calc(100dvh - 28px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
 	padding: 0;
 	border: 1px solid rgba(239, 68, 68, 0.35);
 	border-radius: 20px;
@@ -506,21 +609,26 @@ dialog {
 }
 
 #room-picker-dialog {
-	width: min(620px, calc(100% - 32px));
+	width: min(620px, calc(100% - 28px - env(safe-area-inset-left) - env(safe-area-inset-right)));
 	max-width: 620px;
 	border-color: var(--line);
+	overflow: hidden;
 }
 
 .room-picker-dialog {
-	padding: 24px;
+	display: grid;
+	grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+	max-height: calc(100dvh - 30px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+	padding: 16px;
 }
 
 .room-picker-header,
 .room-picker-tools {
 	display: flex;
-	align-items: center;
+	align-items: stretch;
+	flex-direction: column;
 	justify-content: space-between;
-	gap: 16px;
+	gap: 12px;
 }
 
 .room-picker-header h2 {
@@ -560,7 +668,8 @@ dialog {
 }
 
 .room-picker-tools > div {
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 8px;
 }
 
@@ -570,12 +679,13 @@ dialog {
 
 .room-picker-options {
 	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
+	grid-template-columns: minmax(0, 1fr);
 	gap: 8px;
-	max-height: min(420px, 45vh);
+	min-height: 0;
 	margin-top: 12px;
 	padding: 4px;
 	overflow: auto;
+	overscroll-behavior: contain;
 }
 
 .room-picker-option {
@@ -624,7 +734,10 @@ dialog::backdrop {
 }
 
 .confirm-dialog {
-	padding: 24px;
+	max-height: calc(100dvh - 30px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+	padding: 20px;
+	overflow: auto;
+	overscroll-behavior: contain;
 }
 
 .confirm-dialog h2 {
@@ -637,8 +750,8 @@ dialog::backdrop {
 }
 
 .dialog-actions {
-	display: flex;
-	justify-content: flex-end;
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 10px;
 	margin-top: 20px;
 }
@@ -697,63 +810,144 @@ dialog::backdrop {
 	color: #fca5a5;
 }
 
-@media (max-width: 980px) {
-	.layout {
-		grid-template-columns: 1fr;
+@media (min-width: 480px) {
+	.room-picker-tools > div {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.room-picker-dialog {
+		padding: 20px;
 	}
 }
 
-@media (max-width: 600px) {
-	.notifications {
-		top: max(14px, env(safe-area-inset-top));
-		right: max(14px, env(safe-area-inset-right));
-		left: max(14px, env(safe-area-inset-left));
-		width: auto;
-	}
-
-	.alerts {
-		max-height: calc(100dvh - 28px);
-	}
-
+@media (min-width: 601px) {
 	.app-shell {
-		padding: 14px;
+		padding: 24px;
 	}
 
 	.topbar {
-		align-items: stretch;
-		flex-direction: column;
+		align-items: flex-start;
+		flex-direction: row;
+	}
+
+	.topbar h1 {
+		font-size: 28px;
 	}
 
 	.topbar-actions {
-		justify-content: space-between;
+		justify-content: flex-start;
+	}
+
+	.notifications {
+		top: max(16px, env(safe-area-inset-top));
+		right: max(16px, env(safe-area-inset-right));
+		left: auto;
+		width: min(400px, calc(100vw - 32px));
+	}
+
+	.alerts {
+		max-height: calc(100dvh - 32px - env(safe-area-inset-bottom));
 	}
 
 	.panel {
-		border-radius: 16px;
-	}
-
-	.actions {
-		grid-template-columns: 1fr 1fr;
+		border-radius: 20px;
+		padding: 16px;
 	}
 
 	.room-list-panel .panel-header,
-	.room-picker-header,
-	.room-picker-tools {
-		align-items: stretch;
-		flex-direction: column;
+	.command-panel .panel-header {
+		align-items: center;
+		flex-direction: row;
 	}
 
 	.panel-header-actions {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
+		display: flex;
 	}
 
-	.room-picker-tools > div {
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+	.command-panel {
+		scroll-margin-top: 24px;
+	}
+
+	.room-picker-header {
+		display: flex;
+		align-items: center;
+		flex-direction: row;
+		justify-content: space-between;
+		gap: 16px;
+	}
+
+	.dialog-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+}
+
+@media (min-width: 760px) {
+	.table-wrap {
+		max-height: none;
+		border-block: 0;
+	}
+
+	table {
+		table-layout: auto;
+	}
+
+	th,
+	td {
+		padding: 12px 10px;
+	}
+
+	thead th {
+		position: static;
+		background: transparent;
+		font-size: inherit;
+	}
+
+	th:first-child,
+	#rooms-body td:first-child:not([colspan]),
+	th:nth-child(2),
+	#rooms-body td:nth-child(2),
+	th:nth-child(3),
+	#rooms-body td:nth-child(3) {
+		width: auto;
+	}
+
+	th:nth-child(4),
+	#rooms-body td:nth-child(4),
+	th:nth-child(5),
+	#rooms-body td:nth-child(5) {
+		display: table-cell;
+	}
+
+	.status {
+		padding: 0.3rem 0.7rem;
+		font-size: 0.85rem;
+	}
+
+	.meeting-list {
+		max-height: 420px;
+		overflow: auto;
+		padding-right: 4px;
+	}
+
+	.room-picker-dialog {
+		padding: 24px;
+	}
+
+	.room-picker-tools {
+		align-items: center;
+		flex-direction: row;
+		gap: 16px;
 	}
 
 	.room-picker-options {
-		grid-template-columns: 1fr;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		max-height: min(420px, 45vh);
+	}
+}
+
+@media (min-width: 981px) {
+	.layout {
+		grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.9fr);
 	}
 }

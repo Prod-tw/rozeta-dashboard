@@ -71,6 +71,7 @@ const roomDetails = document.getElementById('room-details')
 const roomMeetings = document.getElementById('room-meetings')
 const meetingsStatus = document.getElementById('meetings-status')
 const alertsNode = document.getElementById('alerts')
+const commandPanelTitle = document.getElementById('command-panel-title')
 const wsStatusNode = document.getElementById('ws-status')
 const resumeDialog = document.getElementById('resume-dialog')
 const resumeMeetingName = document.getElementById('resume-meeting-name')
@@ -161,14 +162,24 @@ async function loadRooms() {
 	render()
 }
 
-function selectRoom(roomName, loadMeetings = false) {
+function selectRoom(roomName, loadMeetings = false, revealCommands = false) {
 	state.selectedRoom = roomName.trim()
 	selectedRoomInput.value = state.selectedRoom
 	targetMeetingInput.value = ''
 	render()
+	if (revealCommands) revealCommandPanel()
 	if (loadMeetings && state.selectedRoom) {
 		void loadRoomMeetings(state.selectedRoom)
 	}
+}
+
+function revealCommandPanel() {
+	if (!window.matchMedia('(max-width: 759px)').matches) return
+	// Selecting a room previously left mobile users above the bounded room list, away from the controls it updates.
+	// Move both the viewport and focus to the command heading, while respecting reduced-motion preferences.
+	const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+	commandPanelTitle.focus({ preventScroll: true })
+	commandPanelTitle.scrollIntoView({ behavior, block: 'start' })
 }
 
 async function loadRoomMeetings(roomName) {
@@ -307,11 +318,11 @@ function renderRooms() {
 		})
 		.join('')
 	roomsBody.querySelectorAll('tr[data-room]').forEach(row => {
-		row.addEventListener('click', () => selectRoom(row.dataset.room, true))
+		row.addEventListener('click', () => selectRoom(row.dataset.room, true, true))
 		row.addEventListener('keydown', event => {
 			if (event.key !== 'Enter' && event.key !== ' ') return
 			event.preventDefault()
-			selectRoom(row.dataset.room, true)
+			selectRoom(row.dataset.room, true, true)
 		})
 	})
 }
@@ -323,14 +334,29 @@ function renderDetails() {
 		roomDetails.textContent = '請選擇房間以查看詳細資訊。'
 		return
 	}
-	roomDetails.textContent = [
-		`會議狀態：${labelFor(meetingStatusLabels, room.status, 'unknown')}`,
-		`API 狀態：${labelFor(apiStatusLabels, room.api_status, 'syncing')}`,
-		`目前會議：${resolveCurrentMeetingName(room)}`,
-		`上次同步：${formatTimestamp(room.last_synced_at)}`,
-		`上次指令：${room.last_command_action ? labelFor(actionLabels, room.last_command_action) : '—'} / ${room.last_command_result ? labelFor(commandResultLabels, room.last_command_result) : '—'}`,
-		`上次錯誤：${room.last_error ? localizeError(room.last_error) : '—'}`,
-	].join('\n')
+	const details = [
+		['會議狀態', labelFor(meetingStatusLabels, room.status, 'unknown')],
+		['API 狀態', labelFor(apiStatusLabels, room.api_status, 'syncing')],
+		['目前會議', resolveCurrentMeetingName(room)],
+		['上次同步', formatTimestamp(room.last_synced_at)],
+		[
+			'上次指令',
+			`${room.last_command_action ? labelFor(actionLabels, room.last_command_action) : '—'} / ${room.last_command_result ? labelFor(commandResultLabels, room.last_command_result) : '—'}`,
+		],
+		['上次錯誤', room.last_error ? localizeError(room.last_error) : '—'],
+	]
+	// The previous newline-separated text was difficult to scan on narrow screens. A definition list keeps each label
+	// associated with its value and gives long meeting IDs or errors a dedicated wrapping column.
+	roomDetails.innerHTML = `<dl class="detail-list">${details
+		.map(
+			([label, value]) => `
+			<div class="detail-row">
+				<dt>${escapeHtml(label)}</dt>
+				<dd>${escapeHtml(value)}</dd>
+			</div>
+		`,
+		)
+		.join('')}</dl>`
 }
 
 function renderMeetingList() {
