@@ -21,14 +21,6 @@
 				</div>
 			</header>
 
-			<section class="panel alert-panel">
-				<div class="panel-header">
-					<h2>通知</h2>
-					<span>顯示指令結果與 Rozeta API 錯誤。</span>
-				</div>
-				<div class="alerts" id="alerts" aria-live="polite"></div>
-			</section>
-
 			<section class="layout">
 				<section class="panel room-list-panel">
 					<div class="panel-header">
@@ -147,6 +139,9 @@
 				</section>
 			</section>
 		</main>
+		<aside class="notifications" aria-label="通知">
+			<div class="alerts" id="alerts" aria-live="polite" aria-atomic="false"></div>
+		</aside>
 		<dialog id="room-picker-dialog" aria-labelledby="room-picker-title" aria-describedby="room-picker-description">
 			<form class="room-picker-dialog" id="room-picker-form">
 				<div class="room-picker-header">

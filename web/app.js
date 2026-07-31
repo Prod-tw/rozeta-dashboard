@@ -415,8 +415,9 @@ function renderActions() {
 function renderAlerts() {
 	const alerts = state.alerts.filter(alert => !alert.room_name || !state.hiddenRooms.has(alert.room_name))
 	if (!alerts.length) {
-		const message = state.alerts.length ? '目前顯示的房間沒有通知。' : '目前沒有通知。'
-		alertsNode.innerHTML = `<div class="alert-empty">${message}</div>`
+		// The previous in-flow panel needed an empty-state label to explain its reserved space. The floating stack now
+		// disappears completely when empty so it neither blocks controls nor leaves a non-actionable overlay behind.
+		alertsNode.replaceChildren()
 		return
 	}
 	alertsNode.innerHTML = alerts
@@ -424,8 +425,10 @@ function renderAlerts() {
 			alert => `
 			<article class="alert ${escapeAttr(alert.level)}">
 				<div class="alert-copy">
-					<span class="alert-level">${escapeHtml(labelFor(alertLevelLabels, alert.level))}</span>
-					${alert.room_name ? `<span class="alert-room">${escapeHtml(alert.room_name)}</span>` : ''}
+					<div class="alert-meta">
+						<span class="alert-level">${escapeHtml(labelFor(alertLevelLabels, alert.level))}</span>
+						${alert.room_name ? `<span class="alert-room">${escapeHtml(alert.room_name)}</span>` : ''}
+					</div>
 					<p>${escapeHtml(alert.message)}</p>
 				</div>
 				${alert.level === 'error' ? `<button type="button" class="alert-dismiss" data-alert-dismiss="${alert.id}" data-tooltip="關閉這則錯誤通知。">關閉</button>` : ''}

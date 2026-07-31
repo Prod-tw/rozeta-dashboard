@@ -167,10 +167,23 @@ button.loading::after {
 .alerts {
 	display: grid;
 	gap: 10px;
+	max-height: calc(100dvh - 32px);
+	padding: 2px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	pointer-events: auto;
+	scrollbar-gutter: stable;
 }
 
-.alert-panel {
-	margin-bottom: 16px;
+/* Notifications previously lived in the page flow, so every new message pushed the controls downward. The fixed
+   stack keeps the dashboard stable while a bounded scroll area prevents persistent errors from covering the page. */
+.notifications {
+	position: fixed;
+	top: max(16px, env(safe-area-inset-top));
+	right: max(16px, env(safe-area-inset-right));
+	z-index: 40;
+	width: min(400px, calc(100vw - 32px));
+	pointer-events: none;
 }
 
 .alert {
@@ -183,6 +196,8 @@ button.loading::after {
 	border-radius: 12px;
 	background: rgba(59, 130, 246, 0.14);
 	border: 1px solid rgba(59, 130, 246, 0.32);
+	box-shadow: 0 16px 38px rgba(3, 7, 18, 0.32);
+	backdrop-filter: blur(16px);
 	color: var(--text);
 	text-align: left;
 }
@@ -196,7 +211,14 @@ button.loading::after {
 
 .alert-copy {
 	display: grid;
-	gap: 6px;
+	gap: 7px;
+	min-width: 0;
+}
+
+.alert-meta {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
 	min-width: 0;
 }
 
@@ -216,7 +238,12 @@ button.loading::after {
 }
 
 .alert-room {
+	overflow: hidden;
+	color: var(--muted);
+	font-size: 0.85rem;
 	font-weight: 600;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .alert-copy p {
@@ -230,11 +257,6 @@ button.loading::after {
 	background: rgba(255, 255, 255, 0.08);
 	color: var(--text);
 	white-space: nowrap;
-}
-
-.alert-empty {
-	color: var(--muted);
-	padding: 2px 2px 0;
 }
 
 .layout {
@@ -682,6 +704,17 @@ dialog::backdrop {
 }
 
 @media (max-width: 600px) {
+	.notifications {
+		top: max(14px, env(safe-area-inset-top));
+		right: max(14px, env(safe-area-inset-right));
+		left: max(14px, env(safe-area-inset-left));
+		width: auto;
+	}
+
+	.alerts {
+		max-height: calc(100dvh - 28px);
+	}
+
 	.app-shell {
 		padding: 14px;
 	}
