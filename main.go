@@ -1,17 +1,21 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,74 +25,174 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
+const (
+	roomSyncInterval        = 10 * time.Second
+	commandPollInterval     = 500 * time.Millisecond
+	commandConfirmationTime = 15 * time.Second
+	roomSyncConcurrency     = 6
+	roomSyncRequestTimeout  = 2 * time.Second
+	roomSyncCycleTimeout    = 9 * time.Second
+)
+
 type app struct {
-	state         *state
-	tokenStore    map[string]string
-	rozetaBaseURL string
-	httpClient    *http.Client
-	upgrader      websocket.Upgrader
+	ctx              context.Context
+	state            *state
+	tokenStore       map[string]string
+	rozetaBaseURL    string
+	httpClient       *http.Client
+	adminPassword    string
+	sessionSecret    []byte
+	loginLimiter     *loginLimiter
+	confirmationTime time.Duration
+	pollInterval     time.Duration
+	upgrader         websocket.Upgrader
 }
 
 func main() {
-	tokenFile := flag.String("token-file", "", "path to room.csv token seed file")
+	tokenFile := flag.String("token-file", "", "path to required room token CSV file")
 	flag.Parse()
 
-	gin.SetMode(gin.ReleaseMode)
-
-	frontend, err := fs.Sub(webAssets, "web")
+	if strings.TrimSpace(*tokenFile) == "" {
+		log.Fatal("-token-file is required")
+	}
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
+	if adminPassword == "" {
+		log.Fatal("ADMIN_PASSWORD is required")
+	}
+	sessionSecret := []byte(os.Getenv("SESSION_SECRET"))
+	if len(sessionSecret) < 32 {
+		log.Fatal("SESSION_SECRET must contain at least 32 bytes")
+	}
+	tokens, err := loadRoomTokens(*tokenFile)
 	if err != nil {
-		log.Fatalf("load assets: %v", err)
+		log.Fatalf("load token file: %v", err)
 	}
 
-	a := &app{
-		state:         newState(),
-		rozetaBaseURL: "https://rozeta.app",
-		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
-		},
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
-		},
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	gin.SetMode(gin.ReleaseMode)
+	a := newApp(ctx, tokens, adminPassword, sessionSecret)
+	router, err := a.router()
+	if err != nil {
+		log.Fatalf("configure router: %v", err)
 	}
 
-	if strings.TrimSpace(*tokenFile) != "" {
-		tokens, err := loadRoomTokens(*tokenFile)
-		if err != nil {
-			log.Fatalf("load token file: %v", err)
+	go a.runRoomSync(ctx)
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	serverErrors := make(chan error, 1)
+	go func() {
+		log.Printf("starting server on %s", server.Addr)
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown server: %v", err)
 		}
-		a.tokenStore = tokens
-	}
-
-	router := gin.New()
-	router.Use(gin.Recovery(), gin.Logger())
-	router.StaticFS("/assets", http.FS(frontend))
-	router.GET("/", a.handleIndex)
-	router.GET("/api/rooms", a.handleListRooms)
-	router.GET("/api/token", a.handleTokenLookup)
-	router.POST("/api/token", a.handleTokenLookup)
-	router.OPTIONS("/api/token", a.handleTokenLookup)
-	router.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
-	router.POST("/api/rooms/:roomName/commands", a.handleCommand)
-	router.GET("/ws/agent", a.handleAgentWS)
-	router.GET("/ws/admin", a.handleAdminWS)
-
-	go a.monitorLostHeartbeats()
-
-	addr := ":8080"
-	log.Printf("starting server on %s", addr)
-	if err := router.Run(addr); err != nil {
-		log.Fatal(err)
+	case err := <-serverErrors:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("serve: %v", err)
+		}
 	}
 }
 
-func (a *app) handleIndex(c *gin.Context) {
-	data, err := fs.ReadFile(mustSubFS(webAssets, "web"), "index.html")
+func newApp(ctx context.Context, tokens map[string]string, adminPassword string, sessionSecret []byte) *app {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a := &app{
+		ctx:              ctx,
+		state:            newState(),
+		tokenStore:       tokens,
+		rozetaBaseURL:    "https://rozeta.app",
+		httpClient:       &http.Client{Timeout: 15 * time.Second},
+		adminPassword:    adminPassword,
+		sessionSecret:    sessionSecret,
+		loginLimiter:     newLoginLimiter(),
+		confirmationTime: commandConfirmationTime,
+		pollInterval:     commandPollInterval,
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+			CheckOrigin: func(request *http.Request) bool {
+				origin := strings.TrimSpace(request.Header.Get("Origin"))
+				if origin == "" {
+					return true
+				}
+				parsed, err := url.Parse(origin)
+				return err == nil && strings.EqualFold(parsed.Host, request.Host)
+			},
+		},
+	}
+	roomNames := make([]string, 0, len(tokens))
+	for roomName := range tokens {
+		roomNames = append(roomNames, roomName)
+	}
+	a.state.seedRooms(roomNames)
+	return a
+}
+
+func (a *app) router() (*gin.Engine, error) {
+	router := gin.New()
+	router.Use(gin.Recovery(), gin.Logger(), a.securityHeaders())
+	// Gin previously trusted forwarded client-IP headers from every peer. Only local
+	// reverse proxies may now supply them, so public clients cannot evade login limits.
+	if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		return nil, err
+	}
+	// StaticFS previously exposed embedded index.html under /assets without the
+	// admin middleware. Serving only the public CSS and script allowlist keeps the
+	// authenticated page itself behind requireAdmin.
+	router.GET("/assets/:name", a.handleAsset)
+	router.GET("/login", a.handleLogin)
+	router.POST("/api/login", a.requireSameOrigin, a.handleLoginRequest)
+
+	protected := router.Group("/")
+	protected.Use(a.requireAdmin)
+	protected.GET("/", a.handleIndex)
+	protected.POST("/api/logout", a.requireSameOrigin, a.handleLogout)
+	protected.GET("/api/rooms", a.handleListRooms)
+	protected.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
+	protected.POST("/api/rooms/:roomName/commands", a.requireSameOrigin, a.handleCommand)
+	protected.GET("/ws/admin", a.handleAdminWS)
+	return router, nil
+}
+
+func (a *app) handleAsset(c *gin.Context) {
+	contentTypes := map[string]string{
+		"app.js":     "text/javascript; charset=utf-8",
+		"login.js":   "text/javascript; charset=utf-8",
+		"styles.css": "text/css; charset=utf-8",
+	}
+	name := c.Param("name")
+	contentType, ok := contentTypes[name]
+	if !ok {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	data, err := webAssets.ReadFile("web/" + name)
 	if err != nil {
-		c.String(http.StatusInternalServerError, "failed to load index: %v", err)
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Data(http.StatusOK, contentType, data)
+}
+
+func (a *app) handleIndex(c *gin.Context) {
+	data, err := webAssets.ReadFile("web/index.html")
+	if err != nil {
+		c.String(http.StatusInternalServerError, "failed to load index")
 		return
 	}
 	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
@@ -98,58 +202,15 @@ func (a *app) handleListRooms(c *gin.Context) {
 	c.JSON(http.StatusOK, a.state.snapshotRooms())
 }
 
-type tokenLookupRequest struct {
-	RoomID string `json:"room_id"`
-}
-
-// The browser cannot read the CSV directly, so the server now owns the token lookup.
-// Before this endpoint, tokens only existed as a file seed; now they are exposed as
-// a small API that can return the matching auth token for a room ID.
-func (a *app) handleTokenLookup(c *gin.Context) {
-	c.Header("Access-Control-Allow-Origin", "*")
-	c.Header("Access-Control-Allow-Headers", "content-type")
-	c.Header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-
-	if c.Request.Method == http.MethodOptions {
-		c.Status(http.StatusNoContent)
-		return
-	}
-
-	if a.tokenStore == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "token file not configured"})
-		return
-	}
-
-	roomID := strings.TrimSpace(c.Query("room_id"))
-	if roomID == "" && c.Request.Method == http.MethodPost {
-		var req tokenLookupRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		roomID = strings.TrimSpace(req.RoomID)
-	}
-
-	if roomID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing room_id"})
-		return
-	}
-
-	token, ok := a.tokenStore[roomID]
-	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room_id"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"room_id": roomID, "auth_token": token})
-}
-
 type roomMeetingView struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Status string `json:"status"`
-	Source string `json:"source_language,omitempty"`
-	Target string `json:"target_language,omitempty"`
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	Source    string    `json:"source_language,omitempty"`
+	Target    string    `json:"target_language,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	PausedAt  time.Time `json:"paused_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 type roomMeetingsResponse struct {
@@ -157,113 +218,26 @@ type roomMeetingsResponse struct {
 	Meetings []roomMeetingView `json:"meetings"`
 }
 
-type rozetaMeetingsPage struct {
-	Data  []rozetaMeeting `json:"data"`
-	Links struct {
-		Next string `json:"next"`
-	} `json:"links"`
-}
-
-type rozetaMeeting struct {
-	ID         string `json:"id"`
-	Title      string `json:"title"`
-	Status     string `json:"status"`
-	HasSummary bool   `json:"has_summary"`
-	Languages  struct {
-		Source string `json:"source"`
-		Target string `json:"target"`
-	} `json:"languages"`
-}
-
-// Admins need a meeting picker for goto commands, but the browser must never see
-// the room auth token. This endpoint keeps the token lookup and the Rozeta fetch
-// server-side, then returns one flattened list so the UI can render all meetings at
-// once without handling pagination itself.
 func (a *app) handleRoomMeetings(c *gin.Context) {
 	roomName := strings.TrimSpace(c.Param("roomName"))
-	if roomName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing room name"})
-		return
-	}
-
-	if a.tokenStore == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "token file not configured"})
-		return
-	}
-
 	token, ok := a.tokenStore[roomName]
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room_name"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room"})
 		return
 	}
-
-	meetings, err := a.fetchRozetaMeetings(token)
+	meetings, err := a.fetchRozetaMeetings(c.Request.Context(), token)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		a.markRoomAPIError(roomName, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to load Rozeta meetings"})
 		return
 	}
-
-	c.JSON(http.StatusOK, roomMeetingsResponse{
-		RoomName: roomName,
-		Meetings: meetings,
-	})
-}
-
-// Rozeta paginates meetings, but the admin picker needs a single list. We follow
-// the `links.next` chain here and flatten every page before returning to the UI.
-func (a *app) fetchRozetaMeetings(token string) ([]roomMeetingView, error) {
-	client := a.httpClient
-	if client == nil {
-		client = http.DefaultClient
+	before, _ := a.state.snapshotRoom(roomName)
+	room, changed := a.state.applyMeetingSync(roomName, meetings)
+	if changed {
+		a.broadcastRoom(room)
 	}
-
-	baseURL := strings.TrimRight(strings.TrimSpace(a.rozetaBaseURL), "/")
-	if baseURL == "" {
-		baseURL = "https://rozeta.app"
-	}
-
-	meetings := make([]roomMeetingView, 0)
-	nextURL := fmt.Sprintf("%s/api/v1/meetings?page=1", baseURL)
-	for nextURL != "" {
-		req, err := http.NewRequest(http.MethodGet, nextURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Cookie", "auth_token="+token)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-
-		var page rozetaMeetingsPage
-		func() {
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-				err = fmt.Errorf("rozeta meetings request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-				return
-			}
-			err = json.NewDecoder(resp.Body).Decode(&page)
-		}()
-		if err != nil {
-			return nil, err
-		}
-
-		for _, meeting := range page.Data {
-			meetings = append(meetings, roomMeetingView{
-				ID:     meeting.ID,
-				Title:  meeting.Title,
-				Status: meeting.Status,
-				Source: meeting.Languages.Source,
-				Target: meeting.Languages.Target,
-			})
-		}
-
-		nextURL = strings.TrimSpace(page.Links.Next)
-	}
-
-	return meetings, nil
+	a.broadcastLateConfirmation(before, room)
+	c.JSON(http.StatusOK, roomMeetingsResponse{RoomName: roomName, Meetings: meetings})
 }
 
 type commandRequest struct {
@@ -271,139 +245,274 @@ type commandRequest struct {
 	TargetMeetingID string `json:"target_meeting_id"`
 }
 
-func isSupportedCommandAction(action string) bool {
-	switch strings.TrimSpace(action) {
-	case "goto", "start", "pause":
-		return true
-	default:
-		return false
-	}
-}
-
 func (a *app) handleCommand(c *gin.Context) {
 	roomName := strings.TrimSpace(c.Param("roomName"))
-	if roomName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing room name"})
+	if _, ok := a.tokenStore[roomName]; !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room"})
 		return
 	}
-
-	var req commandRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	var request commandRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid command request"})
 		return
 	}
-
-	req.Action = strings.TrimSpace(req.Action)
-	req.TargetMeetingID = strings.TrimSpace(req.TargetMeetingID)
-	if req.Action == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing action"})
-		return
-	}
-	if !isSupportedCommandAction(req.Action) {
-		// The command surface is intentionally small so navigation stays separate from
-		// playback. Before this check, old composite actions could still be accepted by
-		// the backend even after the UI stopped exposing them.
+	request.Action = strings.TrimSpace(request.Action)
+	request.TargetMeetingID = strings.TrimSpace(request.TargetMeetingID)
+	expectedStatus, ok := expectedCommandStatus(request.Action)
+	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported action"})
 		return
 	}
+	if (request.Action == "goto" || request.Action == "resume") && request.TargetMeetingID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target meeting is required"})
+		return
+	}
+	if request.Action == "resume" {
+		// Resume permanently deletes transcript data. The UI confirmation is not an
+		// authorization boundary, so the server rechecks the selected meeting state
+		// before allowing the destructive endpoint call.
+		meeting, err := a.fetchRozetaMeeting(c.Request.Context(), a.tokenStore[roomName], request.TargetMeetingID)
+		if err != nil {
+			a.markRoomAPIError(roomName, err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to verify completed meeting"})
+			return
+		}
+		if meeting.Status != "completed" {
+			c.JSON(http.StatusConflict, gin.H{"error": "only completed meetings can be resumed"})
+			return
+		}
+	}
 
-	cmd, room := a.state.issueCommand(roomName, req.Action, req.TargetMeetingID)
-	a.broadcastToAgents(agentEnvelope{
-		Type:            "command",
-		RoomName:        cmd.RoomName,
-		CommandID:       cmd.CommandID,
-		Revision:        cmd.Revision,
-		Action:          cmd.Action,
-		TargetMeetingID: cmd.TargetMeetingID,
-		Timestamp:       cmd.IssuedAt,
-	})
-	a.broadcastToAdmins(adminEnvelope{
-		Type:      "room_snapshot",
-		Room:      room.snapshot(a.state.meetingNames),
-		Timestamp: time.Now().UTC(),
-	})
-
+	cmd, room, err := a.state.beginCommand(roomName, request.Action, request.TargetMeetingID, expectedStatus)
+	if err != nil {
+		status := http.StatusConflict
+		if err.Error() == "unknown room" {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	a.broadcastRoom(room)
+	go a.executeCommand(cmd)
 	c.JSON(http.StatusAccepted, gin.H{
-		"command_id":         cmd.CommandID,
-		"revision":           cmd.Revision,
-		"room_name":          cmd.RoomName,
-		"status":             "sent",
-		"current_status":     room.status,
-		"current_meeting_id": room.currentMeetingID,
+		"command_id": cmd.CommandID,
+		"room_name":  cmd.RoomName,
+		"action":     cmd.Action,
+		"status":     "pending",
 	})
 }
 
-func (a *app) handleAgentWS(c *gin.Context) {
-	conn, err := a.upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		return
+func expectedCommandStatus(action string) (string, bool) {
+	switch action {
+	case "goto":
+		return "", true
+	case "start":
+		return "in_progress", true
+	case "pause":
+		return "paused", true
+	case "resume":
+		return "ready", true
+	default:
+		return "", false
 	}
-
-	client := newAgentClient(conn)
-	a.state.registerAgent(client)
-	go client.writePump()
-	client.readPump(a)
 }
 
-func (a *app) handleAdminWS(c *gin.Context) {
-	conn, err := a.upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
+func (a *app) executeCommand(cmd command) {
+	token := a.tokenStore[cmd.RoomName]
+	timeout := a.confirmationTime
+	if timeout <= 0 {
+		timeout = commandConfirmationTime
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, timeout)
+	defer cancel()
+
+	var sendErr error
+	switch cmd.Action {
+	case "goto":
+		sendErr = a.sendRozetaCommand(ctx, token, "goto_meeting", cmd.TargetMeetingID)
+		if sendErr != nil {
+			a.completeCommand(cmd, "failed", "", sendErr.Error())
+			return
+		}
+		a.completeCommand(cmd, "confirmed", "", "")
 		return
+	case "start":
+		sendErr = a.sendRozetaCommand(ctx, token, "start_meeting", cmd.TargetMeetingID)
+	case "pause":
+		sendErr = a.sendRozetaCommand(ctx, token, "pause_meeting", cmd.TargetMeetingID)
+	case "resume":
+		sendErr = a.resumeRozetaMeeting(ctx, token, cmd.TargetMeetingID)
 	}
 
-	client := newAdminClient(conn)
-	a.state.registerAdmin(client)
-	go client.writePump()
-	client.sendJSON(adminEnvelope{
-		Type:      "snapshot",
-		Rooms:     a.state.snapshotRooms(),
-		Timestamp: time.Now().UTC(),
-	})
-	client.readPump(a)
-}
-
-func (a *app) monitorLostHeartbeats() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	interval := a.pollInterval
+	if interval <= 0 {
+		interval = commandPollInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	for range ticker.C {
-		rooms := a.state.markLostRooms(3 * time.Second)
-		for _, room := range rooms {
-			a.broadcastToAdmins(adminEnvelope{
-				Type:      "alert",
-				Level:     "error",
-				Message:   fmt.Sprintf("room %s lost heartbeat", room.roomName),
-				Room:      room.snapshot(a.state.meetingNames),
-				Timestamp: time.Now().UTC(),
-			})
+	for {
+		meeting, err := a.fetchRozetaMeeting(ctx, token, cmd.TargetMeetingID)
+		if err == nil && meeting.Status == expectedStatusForCommand(cmd.Action) {
+			a.completeCommand(cmd, "confirmed", meeting.Status, "")
+			return
+		}
+		a.markRoomAPIError(cmd.RoomName, err)
+		select {
+		case <-ctx.Done():
+			message := "command confirmation timed out"
+			if sendErr != nil {
+				message += ": " + sendErr.Error()
+			}
+			a.completeCommand(cmd, "confirmation_timeout", "", message)
+			return
+		case <-ticker.C:
 		}
 	}
 }
 
-func (a *app) broadcastToAgents(msg agentEnvelope) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("marshal agent envelope: %v", err)
-		return
-	}
-	a.state.broadcastAgents(data)
+func expectedStatusForCommand(action string) string {
+	status, _ := expectedCommandStatus(action)
+	return status
 }
 
-func (a *app) broadcastToAdmins(msg adminEnvelope) {
-	data, err := json.Marshal(msg)
+func (a *app) completeCommand(cmd command, result, status, message string) {
+	room, ok := a.state.finishCommand(cmd.RoomName, cmd.CommandID, result, status, message)
+	if !ok {
+		return
+	}
+	a.broadcastRoom(room)
+	level := "info"
+	if result == "failed" || result == "confirmation_timeout" {
+		level = "error"
+	}
+	a.broadcastToAdmins(adminEnvelope{
+		Type:      "alert",
+		Level:     level,
+		Message:   fmt.Sprintf("%s %s for %s", cmd.Action, result, cmd.RoomName),
+		Room:      room,
+		Timestamp: time.Now().UTC(),
+	})
+}
+
+func (a *app) handleAdminWS(c *gin.Context) {
+	expiresAt, ok := a.adminSessionExpiry(c.Request)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	conn, err := a.upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		return
+	}
+	// Authentication used to be checked only during upgrade, allowing an open socket
+	// to outlive the fixed session. The read deadline now closes it at cookie expiry.
+	_ = conn.SetReadDeadline(expiresAt)
+	client := newAdminClient(conn)
+	a.state.registerAdmin(client)
+	go client.writePump()
+	client.sendJSON(adminEnvelope{Type: "snapshot", Rooms: a.state.snapshotRooms(), Timestamp: time.Now().UTC()})
+	client.readPump(a)
+}
+
+func (a *app) runRoomSync(ctx context.Context) {
+	a.syncAllRooms(ctx)
+	ticker := time.NewTicker(roomSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.syncAllRooms(ctx)
+		}
+	}
+}
+
+func (a *app) syncAllRooms(ctx context.Context) {
+	cycleCtx, cancel := context.WithTimeout(ctx, roomSyncCycleTimeout)
+	defer cancel()
+	rooms := a.state.snapshotRooms()
+	semaphore := make(chan struct{}, roomSyncConcurrency)
+	var workers sync.WaitGroup
+	for _, room := range rooms {
+		roomName := room.RoomName
+		workers.Go(func() {
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-cycleCtx.Done():
+				return
+			}
+			roomCtx, cancel := context.WithTimeout(cycleCtx, roomSyncRequestTimeout)
+			defer cancel()
+			a.syncRoom(roomCtx, roomName)
+		})
+	}
+	workers.Wait()
+}
+
+func (a *app) syncRoom(ctx context.Context, roomName string) {
+	token := a.tokenStore[roomName]
+	meetings, err := a.fetchRozetaMeetings(ctx, token)
+	if err != nil {
+		apiStatus := "stale"
+		var apiErr *rozetaAPIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+			apiStatus = "authentication_error"
+		}
+		room, changed := a.state.markSyncError(roomName, apiStatus, err.Error())
+		if changed {
+			a.broadcastRoom(room)
+		}
+		return
+	}
+	before, _ := a.state.snapshotRoom(roomName)
+	room, changed := a.state.applyMeetingSync(roomName, meetings)
+	if changed {
+		a.broadcastRoom(room)
+	}
+	a.broadcastLateConfirmation(before, room)
+}
+
+func (a *app) markRoomAPIError(roomName string, err error) {
+	if err == nil {
+		return
+	}
+	apiStatus := "stale"
+	var apiErr *rozetaAPIError
+	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+		apiStatus = "authentication_error"
+	}
+	room, changed := a.state.markSyncError(roomName, apiStatus, err.Error())
+	if changed {
+		a.broadcastRoom(room)
+	}
+}
+
+func (a *app) broadcastLateConfirmation(before, after roomView) {
+	if before.LastCommandResult == "confirmed_late" || after.LastCommandResult != "confirmed_late" {
+		return
+	}
+	a.broadcastToAdmins(adminEnvelope{
+		Type:      "alert",
+		Level:     "info",
+		Message:   fmt.Sprintf("%s confirmed late for %s", after.LastCommandAction, after.RoomName),
+		Room:      after,
+		Timestamp: time.Now().UTC(),
+	})
+}
+
+func (a *app) broadcastRoom(room roomView) {
+	a.broadcastToAdmins(adminEnvelope{Type: "room_snapshot", Room: room, Timestamp: time.Now().UTC()})
+}
+
+func (a *app) broadcastToAdmins(message adminEnvelope) {
+	data, err := json.Marshal(message)
 	if err != nil {
 		log.Printf("marshal admin envelope: %v", err)
 		return
 	}
 	a.state.broadcastAdmins(data)
-}
-
-func mustSubFS(embedded embed.FS, dir string) fs.FS {
-	sub, err := fs.Sub(embedded, dir)
-	if err != nil {
-		panic(err)
-	}
-	return sub
 }
 
 func loadRoomTokens(path string) (map[string]string, error) {
@@ -412,60 +521,51 @@ func loadRoomTokens(path string) (map[string]string, error) {
 		return nil, err
 	}
 	defer file.Close()
-
-	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = -1
-
-	records, err := reader.ReadAll()
+	records, err := csv.NewReader(file).ReadAll()
 	if err != nil {
 		return nil, err
 	}
-
-	tokens := make(map[string]string, len(records))
-	for i, record := range records {
-		if i == 0 && len(record) > 0 && strings.EqualFold(strings.TrimSpace(record[0]), "account") {
-			continue
-		}
-		if len(record) < 3 {
-			continue
-		}
-
-		account := strings.TrimSpace(record[0])
-		token := strings.TrimSpace(record[2])
-		if account == "" || token == "" {
-			continue
-		}
-
-		roomID, ok := strings.CutSuffix(account, "@coscup.org")
-		if !ok {
-			roomID = account
-		}
-		roomID = strings.TrimSpace(roomID)
-		if roomID == "" {
-			continue
-		}
-
-		tokens[roomID] = token
+	if len(records) < 2 || len(records[0]) != 3 || !isTokenHeader(records[0]) {
+		return nil, errors.New("token CSV must start with account/User ID/Token headers")
 	}
 
+	tokens := make(map[string]string, len(records)-1)
+	for index, record := range records[1:] {
+		line := index + 2
+		if len(record) != 3 {
+			return nil, fmt.Errorf("token CSV line %d must have exactly 3 fields", line)
+		}
+		account := strings.TrimSpace(record[0])
+		userID := strings.TrimSpace(record[1])
+		token := strings.TrimSpace(record[2])
+		if account == "" || userID == "" || token == "" {
+			return nil, fmt.Errorf("token CSV line %d has an empty account, user ID, or token", line)
+		}
+		roomName, found := strings.CutSuffix(account, "@coscup.org")
+		if !found {
+			roomName = account
+		}
+		roomName = strings.TrimSpace(roomName)
+		if roomName == "" {
+			return nil, fmt.Errorf("token CSV line %d has an empty room name", line)
+		}
+		if _, duplicate := tokens[roomName]; duplicate {
+			return nil, fmt.Errorf("token CSV line %d duplicates room %q", line, roomName)
+		}
+		tokens[roomName] = token
+	}
+	if len(tokens) == 0 {
+		return nil, errors.New("token CSV contains no rooms")
+	}
 	return tokens, nil
 }
 
-type agentEnvelope struct {
-	Type              string    `json:"type"`
-	RoomName          string    `json:"room_name,omitempty"`
-	AgentID           string    `json:"agent_id,omitempty"`
-	CommandID         string    `json:"command_id,omitempty"`
-	Revision          int       `json:"revision,omitempty"`
-	Action            string    `json:"action,omitempty"`
-	TargetMeetingID   string    `json:"target_meeting_id,omitempty"`
-	Status            string    `json:"status,omitempty"`
-	CurrentMeetingID  string    `json:"current_meeting_id,omitempty"`
-	Timestamp         time.Time `json:"timestamp,omitempty"`
-	LastCommandID     string    `json:"last_command_id,omitempty"`
-	LastCommandResult string    `json:"last_command_result,omitempty"`
-	LastError         string    `json:"last_error,omitempty"`
-	HeartbeatMS       int64     `json:"heartbeat_ms,omitempty"`
+func isTokenHeader(record []string) bool {
+	accountHeader := strings.TrimSpace(record[0])
+	userIDHeader := strings.TrimSpace(record[1])
+	tokenHeader := strings.TrimSpace(record[2])
+	return (strings.EqualFold(accountHeader, "account") || accountHeader == "帳號") &&
+		strings.EqualFold(userIDHeader, "User ID") && strings.EqualFold(tokenHeader, "token")
 }
 
 type adminEnvelope struct {
@@ -488,28 +588,17 @@ type command struct {
 
 type roomView struct {
 	RoomName             string    `json:"room_name"`
-	AgentID              string    `json:"agent_id,omitempty"`
 	Status               string    `json:"status"`
+	APIStatus            string    `json:"api_status"`
 	CurrentMeetingID     string    `json:"current_meeting_id,omitempty"`
 	CurrentMeetingName   string    `json:"current_meeting_name,omitempty"`
+	LastSyncedAt         time.Time `json:"last_synced_at,omitempty"`
 	LastCommandID        string    `json:"last_command_id,omitempty"`
+	LastCommandAction    string    `json:"last_command_action,omitempty"`
 	LastCommandResult    string    `json:"last_command_result,omitempty"`
 	LastError            string    `json:"last_error,omitempty"`
-	LastHeartbeatAt      time.Time `json:"last_heartbeat_at,omitempty"`
-	HeartbeatAgeSeconds  float64   `json:"heartbeat_age_seconds,omitempty"`
 	PendingCommandID     string    `json:"pending_command_id,omitempty"`
 	PendingCommandAction string    `json:"pending_command_action,omitempty"`
+	PendingCommandTarget string    `json:"pending_command_target,omitempty"`
 	UpdatedAt            time.Time `json:"updated_at,omitempty"`
-}
-
-type snapshotHeartbeat struct {
-	RoomName          string    `json:"room_name"`
-	AgentID           string    `json:"agent_id"`
-	Status            string    `json:"status"`
-	CurrentMeetingID  string    `json:"current_meeting_id"`
-	Timestamp         time.Time `json:"timestamp"`
-	LastCommandID     string    `json:"last_command_id"`
-	LastCommandResult string    `json:"last_command_result"`
-	LastError         string    `json:"last_error"`
-	Type              string    `json:"type"`
 }

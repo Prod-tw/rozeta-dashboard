@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"sort"
 	"strings"
@@ -11,29 +12,44 @@ import (
 	"time"
 )
 
+var (
+	errCommandPending = errors.New("room already has a pending command")
+	errRoomNotReady   = errors.New("room meeting state is not ready")
+	errCurrentUnknown = errors.New("current meeting is unknown; send goto first")
+)
+
 type state struct {
-	mu              sync.RWMutex
-	rooms           map[string]*roomState
-	meetingNames    map[string]string
-	agentClients    map[*agentClient]struct{}
-	roomOwners      map[string]*agentClient
-	adminClients    map[*adminClient]struct{}
-	commandRevision map[string]int
+	mu           sync.RWMutex
+	rooms        map[string]*roomState
+	meetingNames map[string]string
+	adminClients map[*adminClient]struct{}
+	revisions    map[string]int
 }
 
 type roomState struct {
-	roomName             string
-	agentID              string
-	status               string
-	currentMeetingID     string
-	lastCommandID        string
-	lastCommandResult    string
-	lastError            string
-	lastHeartbeatAt      time.Time
-	updatedAt            time.Time
-	pendingCommandID     string
-	pendingCommandAction string
-	lostNotified         bool
+	roomName           string
+	status             string
+	currentMeetingID   string
+	currentFromGoto    bool
+	apiStatus          string
+	lastSyncedAt       time.Time
+	syncError          string
+	commandError       string
+	lastCommandID      string
+	lastCommandAction  string
+	lastCommandResult  string
+	lastCommandTarget  string
+	lastExpectedStatus string
+	updatedAt          time.Time
+	pending            *pendingCommand
+}
+
+type pendingCommand struct {
+	CommandID      string
+	Action         string
+	TargetID       string
+	ExpectedStatus string
+	IssuedAt       time.Time
 }
 
 func newState() *state {
@@ -43,12 +59,10 @@ func newState() *state {
 	}
 
 	return &state{
-		rooms:           make(map[string]*roomState),
-		meetingNames:    meetingNames,
-		agentClients:    make(map[*agentClient]struct{}),
-		roomOwners:      make(map[string]*agentClient),
-		adminClients:    make(map[*adminClient]struct{}),
-		commandRevision: make(map[string]int),
+		rooms:        make(map[string]*roomState),
+		meetingNames: meetingNames,
+		adminClients: make(map[*adminClient]struct{}),
+		revisions:    make(map[string]int),
 	}
 }
 
@@ -67,108 +81,213 @@ func loadMeetingNames(path string) (map[string]string, error) {
 	return mapping, nil
 }
 
-func (s *state) issueCommand(roomName, action, targetMeetingID string) (command, *roomState) {
-	now := time.Now().UTC()
-	roomName = strings.TrimSpace(roomName)
-	action = strings.TrimSpace(action)
-	targetMeetingID = strings.TrimSpace(targetMeetingID)
+// Rooms previously appeared only after a userscript heartbeat. Direct API control
+// has no agent, so every configured token now creates a syncing room at startup.
+func (s *state) seedRooms(roomNames []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
+	for _, roomName := range roomNames {
+		roomName = strings.TrimSpace(roomName)
+		if roomName == "" {
+			continue
+		}
+		if _, exists := s.rooms[roomName]; exists {
+			continue
+		}
+		s.rooms[roomName] = &roomState{
+			roomName:  roomName,
+			status:    "unknown",
+			apiStatus: "syncing",
+			updatedAt: time.Now().UTC(),
+		}
+	}
+}
+
+func (s *state) beginCommand(roomName, action, targetID, expectedStatus string) (command, roomView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	room, ok := s.rooms[roomName]
 	if !ok {
-		room = &roomState{roomName: roomName, status: "ready"}
-		s.rooms[roomName] = room
+		return command{}, roomView{}, errors.New("unknown room")
+	}
+	if room.pending != nil {
+		return command{}, roomView{}, errCommandPending
+	}
+	if room.apiStatus == "authentication_error" {
+		return command{}, roomView{}, errRoomNotReady
+	}
+	if (action == "start" || action == "pause") && room.apiStatus != "synced" {
+		return command{}, roomView{}, errRoomNotReady
+	}
+	if (action == "start" || action == "pause") && room.currentMeetingID == "" {
+		return command{}, roomView{}, errCurrentUnknown
 	}
 
-	s.commandRevision[roomName]++
-	revision := s.commandRevision[roomName]
-	cmdID := newID("cmd")
-
-	room.pendingCommandID = cmdID
-	room.pendingCommandAction = action
-	room.lastCommandID = cmdID
-	room.lastCommandResult = "pending"
-	room.lastError = ""
-	room.updatedAt = now
-
-	// Navigation and playback are now separate actions. The backend only records
-	// the explicit commands still exposed in the admin UI.
-	switch action {
-	case "goto":
-		room.status = "switching"
-	case "start":
-		room.status = "in_progress"
-	case "pause":
-		room.status = "paused"
-	default:
-		room.status = "ready"
+	if action == "start" || action == "pause" {
+		targetID = room.currentMeetingID
 	}
 
-	return command{
-		CommandID:       cmdID,
+	now := time.Now().UTC()
+	s.revisions[roomName]++
+	cmd := command{
+		CommandID:       newID("cmd"),
 		RoomName:        roomName,
 		Action:          action,
-		TargetMeetingID: targetMeetingID,
-		Revision:        revision,
+		TargetMeetingID: targetID,
+		Revision:        s.revisions[roomName],
 		IssuedAt:        now,
-	}, room
-}
-
-func (s *state) applyHeartbeat(h snapshotHeartbeat) (roomView, bool) {
-	now := time.Now().UTC()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	room, ok := s.rooms[h.RoomName]
-	if !ok {
-		room = &roomState{roomName: h.RoomName}
-		s.rooms[h.RoomName] = room
 	}
-
-	recovered := room.lostNotified
-	room.roomName = h.RoomName
-	room.agentID = h.AgentID
-	if h.Status != "" {
-		room.status = h.Status
+	room.pending = &pendingCommand{
+		CommandID:      cmd.CommandID,
+		Action:         action,
+		TargetID:       targetID,
+		ExpectedStatus: expectedStatus,
+		IssuedAt:       now,
 	}
-	room.currentMeetingID = h.CurrentMeetingID
-	room.lastHeartbeatAt = now
+	room.lastCommandID = cmd.CommandID
+	room.lastCommandAction = action
+	room.lastCommandResult = "pending"
+	room.lastCommandTarget = targetID
+	room.lastExpectedStatus = expectedStatus
+	room.commandError = ""
 	room.updatedAt = now
-	room.lastCommandID = h.LastCommandID
-	room.lastCommandResult = h.LastCommandResult
-	room.lastError = h.LastError
-	room.lostNotified = false
 
-	if room.status == "" {
-		room.status = "ready"
-	}
-
-	return room.snapshotLocked(s.meetingNames), recovered
+	return cmd, room.snapshotLocked(s.meetingNames), nil
 }
 
-func (s *state) markLostRooms(timeout time.Duration) []*roomState {
-	now := time.Now().UTC()
-
+func (s *state) finishCommand(roomName, commandID, result, status, message string) (roomView, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var lost []*roomState
-	for _, room := range s.rooms {
-		if room.lastHeartbeatAt.IsZero() || room.lostNotified {
-			continue
-		}
-		if now.Sub(room.lastHeartbeatAt) > timeout {
-			room.status = "lost"
-			room.lastError = "heartbeat timeout"
-			room.updatedAt = now
-			room.lostNotified = true
-			lost = append(lost, room)
+	room, ok := s.rooms[roomName]
+	if !ok || room.pending == nil || room.pending.CommandID != commandID {
+		return roomView{}, false
+	}
+	pending := room.pending
+	room.pending = nil
+	room.lastCommandResult = result
+	room.commandError = message
+	room.updatedAt = time.Now().UTC()
+	if status != "" && room.currentMeetingID == pending.TargetID {
+		room.status = status
+	}
+	// A successful goto is the only API-only signal that identifies a ready meeting.
+	// Previously the userscript URL heartbeat supplied this value; now the server keeps
+	// the explicit target until Rozeta meeting status provides a newer observation.
+	if pending.Action == "goto" && result == "confirmed" {
+		room.currentMeetingID = pending.TargetID
+		room.currentFromGoto = true
+	}
+
+	return room.snapshotLocked(s.meetingNames), true
+}
+
+func (s *state) applyMeetingSync(roomName string, meetings []roomMeetingView) (roomView, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room, ok := s.rooms[roomName]
+	if !ok {
+		return roomView{}, false
+	}
+	before := room.snapshotLocked(s.meetingNames)
+	now := time.Now().UTC()
+	room.apiStatus = "synced"
+	room.lastSyncedAt = now
+	room.syncError = ""
+	room.updatedAt = now
+
+	meetingByID := make(map[string]roomMeetingView, len(meetings))
+	inProgress := make([]roomMeetingView, 0, 1)
+	paused := make([]roomMeetingView, 0, 1)
+	for _, meeting := range meetings {
+		meetingByID[meeting.ID] = meeting
+		switch meeting.Status {
+		case "in_progress":
+			inProgress = append(inProgress, meeting)
+		case "paused":
+			paused = append(paused, meeting)
 		}
 	}
-	return lost
+
+	current, currentFound := meetingByID[room.currentMeetingID]
+	if room.currentFromGoto {
+		if currentFound {
+			room.status = current.Status
+		} else {
+			// A successful Goto remains authoritative for this process. Previously one
+			// incomplete list response silently retargeted the room to another meeting;
+			// now controls stay disabled until the explicit target is observable again.
+			room.apiStatus = "stale"
+			room.status = "unknown"
+			room.syncError = "current goto meeting was not found in Rozeta"
+		}
+	} else {
+		switch {
+		case len(inProgress) == 1:
+			room.currentMeetingID = inProgress[0].ID
+			room.status = inProgress[0].Status
+		case len(inProgress) > 1:
+			room.currentMeetingID = ""
+			room.status = "unknown"
+			room.syncError = "multiple in-progress meetings; send goto first"
+		case len(paused) == 1:
+			room.currentMeetingID = paused[0].ID
+			room.status = paused[0].Status
+		case len(paused) > 1:
+			room.currentMeetingID = ""
+			room.status = "unknown"
+			room.syncError = "multiple paused meetings; send goto first"
+		default:
+			room.currentMeetingID = ""
+			room.status = "ready"
+		}
+	}
+
+	// A timed-out command can complete after its 15-second confirmation window. The
+	// old state stayed failed forever; periodic sync now upgrades that exact result.
+	lateTarget, lateTargetFound := meetingByID[room.lastCommandTarget]
+	lateConfirmed := room.pending == nil && room.lastCommandResult == "confirmation_timeout" && lateTargetFound &&
+		lateTarget.Status == room.lastExpectedStatus
+	if lateConfirmed {
+		room.lastCommandResult = "confirmed_late"
+		room.commandError = ""
+	}
+
+	after := room.snapshotLocked(s.meetingNames)
+	return after, lateConfirmed || before.APIStatus != after.APIStatus || before.Status != after.Status ||
+		before.CurrentMeetingID != after.CurrentMeetingID || before.LastCommandResult != after.LastCommandResult ||
+		before.LastError != after.LastError
+}
+
+func (s *state) markSyncError(roomName, apiStatus, message string) (roomView, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	room, ok := s.rooms[roomName]
+	if !ok {
+		return roomView{}, false
+	}
+	if room.apiStatus == "authentication_error" && apiStatus == "stale" {
+		return room.snapshotLocked(s.meetingNames), false
+	}
+	changed := room.apiStatus != apiStatus || room.syncError != message
+	room.apiStatus = apiStatus
+	room.syncError = message
+	room.updatedAt = time.Now().UTC()
+	return room.snapshotLocked(s.meetingNames), changed
+}
+
+func (s *state) snapshotRoom(roomName string) (roomView, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	room, ok := s.rooms[roomName]
+	if !ok {
+		return roomView{}, false
+	}
+	return room.snapshotLocked(s.meetingNames), true
 }
 
 func (s *state) snapshotRooms() []roomView {
@@ -185,17 +304,16 @@ func (s *state) snapshotRooms() []roomView {
 	return views
 }
 
-func (s *state) broadcastAgents(data []byte) {
-	s.mu.RLock()
-	clients := make([]*agentClient, 0, len(s.agentClients))
-	for client := range s.agentClients {
-		clients = append(clients, client)
-	}
-	s.mu.RUnlock()
+func (s *state) registerAdmin(client *adminClient) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.adminClients[client] = struct{}{}
+}
 
-	for _, client := range clients {
-		client.enqueue(data)
-	}
+func (s *state) unregisterAdmin(client *adminClient) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.adminClients, client)
 }
 
 func (s *state) broadcastAdmins(data []byte) {
@@ -211,87 +329,33 @@ func (s *state) broadcastAdmins(data []byte) {
 	}
 }
 
-func (s *state) registerAgent(client *agentClient) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.agentClients[client] = struct{}{}
-}
-
-func (s *state) unregisterAgent(client *agentClient) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// This release is needed because the previous behavior only forgot the socket,
-	// which left the room usable by a second agent even while the first one was still
-	// considered connected. Releasing ownership here makes room claims exclusive.
-	for roomName, owner := range s.roomOwners {
-		if owner == client {
-			delete(s.roomOwners, roomName)
-		}
-	}
-	delete(s.agentClients, client)
-}
-
-func (s *state) claimRoom(roomName string, client *agentClient) (*roomState, bool) {
-	roomName = strings.TrimSpace(roomName)
-	if roomName == "" {
-		return &roomState{}, false
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	room, ok := s.rooms[roomName]
-	if !ok {
-		room = &roomState{roomName: roomName, status: "ready", updatedAt: time.Now().UTC()}
-		s.rooms[roomName] = room
-	}
-
-	if owner, occupied := s.roomOwners[roomName]; occupied && owner != client {
-		return room, false
-	}
-
-	// Claiming the room during the hello handshake ensures the server rejects the
-	// second websocket immediately instead of letting both agents stream heartbeats.
-	s.roomOwners[roomName] = client
-	return room, true
-}
-
-func (s *state) registerAdmin(client *adminClient) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.adminClients[client] = struct{}{}
-}
-
-func (s *state) unregisterAdmin(client *adminClient) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.adminClients, client)
-}
-
-func (r *roomState) snapshot(meetingNames map[string]string) roomView {
-	return r.snapshotLocked(meetingNames)
-}
-
 func (r *roomState) snapshotLocked(meetingNames map[string]string) roomView {
-	meetingName := meetingNames[r.currentMeetingID]
-	age := 0.0
-	if !r.lastHeartbeatAt.IsZero() {
-		age = time.Since(r.lastHeartbeatAt).Seconds()
+	pendingID := ""
+	pendingAction := ""
+	pendingTarget := ""
+	if r.pending != nil {
+		pendingID = r.pending.CommandID
+		pendingAction = r.pending.Action
+		pendingTarget = r.pending.TargetID
+	}
+	lastError := r.commandError
+	if lastError == "" {
+		lastError = r.syncError
 	}
 	return roomView{
 		RoomName:             r.roomName,
-		AgentID:              r.agentID,
 		Status:               r.status,
+		APIStatus:            r.apiStatus,
 		CurrentMeetingID:     r.currentMeetingID,
-		CurrentMeetingName:   meetingName,
+		CurrentMeetingName:   meetingNames[r.currentMeetingID],
+		LastSyncedAt:         r.lastSyncedAt,
 		LastCommandID:        r.lastCommandID,
+		LastCommandAction:    r.lastCommandAction,
 		LastCommandResult:    r.lastCommandResult,
-		LastError:            r.lastError,
-		LastHeartbeatAt:      r.lastHeartbeatAt,
-		HeartbeatAgeSeconds:  age,
-		PendingCommandID:     r.pendingCommandID,
-		PendingCommandAction: r.pendingCommandAction,
+		LastError:            lastError,
+		PendingCommandID:     pendingID,
+		PendingCommandAction: pendingAction,
+		PendingCommandTarget: pendingTarget,
 		UpdatedAt:            r.updatedAt,
 	}
 }
@@ -299,7 +363,7 @@ func (r *roomState) snapshotLocked(meetingNames map[string]string) roomView {
 func newID(prefix string) string {
 	var raw [8]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return prefix + "-" + time.Now().UTC().Format("20060102150405.000000000")
+		return prefix + "-fallback"
 	}
 	return prefix + "-" + hex.EncodeToString(raw[:])
 }

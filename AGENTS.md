@@ -2,27 +2,33 @@
 
 ## Overview
 
-- `go run .` starts the only backend process: Gin HTTP, websocket, and the embedded admin UI.
-- `main.go` wires the server, `state.go` owns room state, and `ws.go` owns websocket session handling.
-- `rozeta-command-panel.user.js` is the room-side userscript; `token.js` only sets the Rozeta `auth_token` cookie.
+- `go run . -token-file room.csv` starts the only process: Gin HTTP, admin WebSocket, embedded UI, and Rozeta synchronization.
+- `main.go` wires routes and command execution, `rozeta.go` owns Rozeta HTTP calls, `state.go` owns room state, `auth.go` owns admin sessions, and `ws.go` owns admin WebSocket clients.
+- There is no room userscript or agent WebSocket. Room state comes from Rozeta meeting APIs.
 
-## Run
+## Start
 
-- Open the admin UI at `https://coscup.1li.tw` after `go run .`.
-- Load `rozeta-command-panel.user.js` into Tampermonkey on each always-on room browser.
-- Set the same backend URL and room name in the userscript panel.
+```sh
+export ADMIN_PASSWORD='replace-with-a-strong-password'
+export SESSION_SECRET='replace-with-at-least-32-random-bytes'
+go run . -token-file room.csv
+```
 
-## Commands
+The token CSV is required. Missing files, malformed rows, empty fields, and duplicate room names stop startup. One token that Rozeta later rejects marks only that room as `authentication_error`.
 
-- `go test ./...` runs the Go tests.
-- `go test ./... -run TestAgentHelloRejectsDuplicateRoom` is the focused websocket ownership check.
+## Debug
+
+- `go test ./...` runs all tests.
+- `go test -race ./...` checks concurrent room synchronization, command completion, and WebSocket state.
+- Inspect the room's API status, last sync, last command result, and last error in the admin UI.
+- Use Goto before Start or Pause if the server cannot resolve one current meeting.
+- Start and Pause poll every 500 milliseconds for up to 15 seconds; later matches become `confirmed_late`.
 
 ## Runtime Facts
 
-- Agents connect on `/ws/agent`; admins connect on `/ws/admin`.
-- Heartbeats are sent every 1 second, and rooms are marked lost after 3 seconds without one.
-- Room claims are exclusive: the server rejects a second agent for the same room with websocket close code `4409`.
-- Commands are broadcast to all agents, but each agent only executes messages for its own room name.
-- Supported commands are `goto`, `start`, and `pause`.
-- `meeting-names.json` in the repo root is optional and maps meeting IDs to display names.
-- Use `goto` first, then `start` after the room finishes loading.
+- Rooms synchronize every 10 seconds with a concurrency limit of six and a two-second deadline per room.
+- Commands are serialized per room but different rooms can run commands concurrently.
+- Goto completes when Rozeta accepts the command and cannot confirm browser navigation.
+- Resume permanently deletes the completed meeting's transcription and translation data.
+- Admin sessions have a fixed 72-hour lifetime and require HTTPS for the secure cookie.
+- Runtime room and command state is not persisted across backend restarts.

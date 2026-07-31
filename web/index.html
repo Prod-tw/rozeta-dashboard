@@ -1,80 +1,98 @@
 <!doctype html>
 <html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Rozeta Remote Management</title>
+		<link rel="stylesheet" href="/assets/styles.css" />
+	</head>
 
-<head>
-	<meta charset="utf-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<title>Rozeta Remote Management</title>
-	<link rel="stylesheet" href="/assets/styles.css" />
-</head>
+	<body>
+		<main class="app-shell">
+			<header class="topbar">
+				<div>
+					<p class="eyebrow">COSCUP OPERATIONS</p>
+					<h1>Rozeta Remote Management</h1>
+					<p>Direct API control and meeting-state confirmation.</p>
+				</div>
+				<div class="topbar-actions">
+					<div class="connection-pill" id="ws-status">connecting</div>
+					<button type="button" id="logout-btn">Logout</button>
+				</div>
+			</header>
 
-<body>
-	<main class="app-shell">
-		<header class="topbar">
-			<div>
-				<h1>Rozeta Remote Management</h1>
-				<p>Broadcast control for always-on room agents.</p>
-			</div>
-			<div class="connection-pill" id="ws-status">connecting</div>
-		</header>
-
-		<section class="panel alert-panel">
-			<div class="panel-header">
-				<h2>Alerts</h2>
-				<span>Info auto-clears, errors stay until dismissed or recovered.</span>
-			</div>
-			<div class="alerts" id="alerts"></div>
-		</section>
-
-		<section class="layout">
-			<section class="panel room-list-panel">
+			<section class="panel alert-panel">
 				<div class="panel-header">
-					<h2>Rooms</h2>
-					<button type="button" id="refresh-btn">Refresh</button>
+					<h2>Alerts</h2>
+					<span>Command outcomes and Rozeta API failures.</span>
 				</div>
-				<div class="table-wrap">
-					<table>
-						<thead>
-							<tr>
-								<th>Room</th>
-								<th>Status</th>
-								<th>Current Meeting</th>
-								<th>Heartbeat</th>
-							</tr>
-						</thead>
-						<tbody id="rooms-body"></tbody>
-					</table>
-				</div>
+				<div class="alerts" id="alerts"></div>
 			</section>
 
-			<section class="panel command-panel">
-				<div class="panel-header">
-					<h2>Command</h2>
-					<span id="selected-room-label">No room selected</span>
-				</div>
-				<label>
-					<span>Room Name</span>
-					<input id="selected-room" type="text" placeholder="room-01" />
-				</label>
-				<label>
-					<span>Meeting ID</span>
-					<input id="target-meeting" type="text" placeholder="B0e44K6Iav" />
-				</label>
-				<div class="actions">
-					<button type="button" data-action="goto">Goto</button>
-					<button type="button" data-action="start">Start</button>
-					<button type="button" data-action="pause">Pause</button>
-				</div>
-				<div class="details" id="room-details"></div>
-				<div class="meeting-list-header">
-					<h3>Meetings</h3>
-					<span id="meetings-status">Select a room</span>
-				</div>
-				<div class="meeting-list" id="room-meetings"></div>
-			</section>
-		</section>
-	</main>
-	<script src="/assets/app.js" defer></script>
-</body>
+			<section class="layout">
+				<section class="panel room-list-panel">
+					<div class="panel-header">
+						<h2>Rooms</h2>
+						<button type="button" id="refresh-btn">Refresh</button>
+					</div>
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr>
+									<th>Room</th>
+									<th>Meeting</th>
+									<th>API</th>
+									<th>Current Meeting</th>
+									<th>Last Sync</th>
+								</tr>
+							</thead>
+							<tbody id="rooms-body"></tbody>
+						</table>
+					</div>
+				</section>
 
+				<section class="panel command-panel">
+					<div class="panel-header">
+						<h2>Command</h2>
+						<span id="selected-room-label">No room selected</span>
+					</div>
+					<label>
+						<span>Room Name</span>
+						<input id="selected-room" type="text" placeholder="Select from the room table" readonly />
+					</label>
+					<label>
+						<span>Meeting ID</span>
+						<input id="target-meeting" type="text" placeholder="B0e44K6Iav" />
+					</label>
+					<div class="actions">
+						<button type="button" data-action="goto"><span>Goto</span></button>
+						<button type="button" data-action="start"><span>Start</span></button>
+						<button type="button" data-action="pause"><span>Pause</span></button>
+						<button type="button" class="danger-action" data-action="resume"><span>Resume</span></button>
+					</div>
+					<div class="details" id="room-details"></div>
+					<div class="meeting-list-header">
+						<h3>Meetings</h3>
+						<span id="meetings-status">Select a room</span>
+					</div>
+					<div class="meeting-list" id="room-meetings"></div>
+				</section>
+			</section>
+		</main>
+		<dialog id="resume-dialog">
+			<form method="dialog" class="confirm-dialog">
+				<p class="eyebrow">DESTRUCTIVE ACTION</p>
+				<h2>Resume completed meeting?</h2>
+				<p>
+					Rozeta will permanently delete all transcriptions and translations for
+					<strong id="resume-meeting-name"></strong>, then reset it to ready.
+				</p>
+				<div class="dialog-actions">
+					<button type="submit" value="cancel">Cancel</button>
+					<button type="button" class="danger-action" id="resume-confirm">Confirm Resume</button>
+				</div>
+			</form>
+		</dialog>
+		<script src="/assets/app.js" defer></script>
+	</body>
 </html>

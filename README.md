@@ -1,15 +1,28 @@
 # Rozeta Remote Management
 
-Remote control for multiple Rozeta meeting rooms using a browser userscript and a backend control plane.
+Authenticated control panel for managing multiple Rozeta room accounts through the Rozeta meeting and command APIs.
 
 ## How to Run
 
-1. Run the backend with `go run .`.
-2. Open `https://coscup.1li.tw` for the admin UI.
-3. Install `https://coscup.1li.tw/assets/agent.user.js` in Tampermonkey on each always-on Rozeta browser.
-4. Set the same backend URL and the room name in the userscript panel.
-5. Use the admin UI to send `goto`, `start`, or `pause`.
-6. Optionally add a `meeting-names.json` file in the project root to map meeting IDs to display names.
+Use Go 1.25 and provide the admin credentials plus the required room token CSV:
+
+```sh
+export ADMIN_PASSWORD='replace-with-a-strong-password'
+export SESSION_SECRET='replace-with-at-least-32-random-bytes'
+go run . -token-file room.csv
+```
+
+Open `http://localhost:8080` directly for development, or the configured HTTPS deployment URL in production. The secure session cookie requires HTTPS in production.
+
+The CSV must start with either `account,User ID,Token` or `帳號,User ID,Token`. Room names are derived by removing `@coscup.org` from the account field.
+
+Use Goto before Start or Pause when no unique active meeting can be resolved. Start and Pause wait up to 15 seconds for Rozeta to report the expected meeting status. Resume permanently deletes the selected completed meeting's transcriptions and translations before resetting it to ready.
+
+Run tests with:
+
+```sh
+go test ./...
+```
 
 ## License
 

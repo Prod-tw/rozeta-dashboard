@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Sign in | Rozeta Remote</title>
+		<link rel="stylesheet" href="/assets/styles.css" />
+	</head>
+
+	<body class="login-page">
+		<main class="login-card">
+			<p class="eyebrow">COSCUP OPERATIONS</p>
+			<h1>Room control</h1>
+			<p class="login-copy">Enter the shared operations password to manage Rozeta rooms.</p>
+			<form id="login-form">
+				<label>
+					<span>Password</span>
+					<input
+						id="password"
+						name="password"
+						type="password"
+						autocomplete="current-password"
+						required
+						autofocus
+					/>
+				</label>
+				<button type="submit" id="login-button"><span>Sign in</span></button>
+				<p class="form-error" id="login-error" role="alert"></p>
+			</form>
+		</main>
+		<script src="/assets/login.js" defer></script>
+	</body>
+</html>

@@ -1,54 +1,76 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-
-	"github.com/gin-gonic/gin"
 )
 
 func TestLoadRoomTokens(t *testing.T) {
-	tempDir := t.TempDir()
-	path := filepath.Join(tempDir, "room.csv")
-	content := []byte("account,User ID,Token\nTR409-2@coscup.org,cTMsWD4FqJ,token-a\nroom-b@coscup.org,ignored,token-b\n")
-	if err := os.WriteFile(path, content, 0o600); err != nil {
-		t.Fatalf("write csv: %v", err)
+	tests := []struct {
+		name    string
+		content string
+		want    map[string]string
+	}{
+		{
+			name:    "English header",
+			content: "account,User ID,Token\nTR409-2@coscup.org,user-a,token-a\n",
+			want:    map[string]string{"TR409-2": "token-a"},
+		},
+		{
+			name:    "Chinese account header",
+			content: "帳號,User ID,Token\nRB105@coscup.org,user-b,token-b\n",
+			want:    map[string]string{"RB105": "token-b"},
+		},
 	}
 
-	tokens, err := loadRoomTokens(path)
-	if err != nil {
-		t.Fatalf("load tokens: %v", err)
-	}
-
-	if got := tokens["TR409-2"]; got != "token-a" {
-		t.Fatalf("token for TR409-2 = %q, want %q", got, "token-a")
-	}
-	if got := tokens["room-b"]; got != "token-b" {
-		t.Fatalf("token for room-b = %q, want %q", got, "token-b")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeTokenCSV(t, test.content)
+			tokens, err := loadRoomTokens(path)
+			if err != nil {
+				t.Fatalf("loadRoomTokens() error = %v", err)
+			}
+			for roomName, want := range test.want {
+				if got := tokens[roomName]; got != want {
+					t.Fatalf("token for %s = %q, want %q", roomName, got, want)
+				}
+			}
+		})
 	}
 }
 
-func TestHandleTokenLookup(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	a := &app{tokenStore: map[string]string{"TR409-2": "token-a"}}
-
-	router := gin.New()
-	router.GET("/api/token", a.handleTokenLookup)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/token?room_id=TR409-2", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+func TestLoadRoomTokensRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		wantError string
+	}{
+		{name: "missing header", content: "room,user,token-a\n", wantError: "headers"},
+		{name: "wrong user ID header", content: "account,Identifier,Token\nroom,user,token-a\n", wantError: "headers"},
+		{name: "empty token", content: "account,User ID,Token\nroom,user,\n", wantError: "line 2"},
+		{name: "empty user ID", content: "account,User ID,Token\nroom,,token-a\n", wantError: "line 2"},
+		{name: "short row", content: "account,User ID,Token\nroom,user\n", wantError: "line 2"},
+		{name: "extra field", content: "account,User ID,Token\nroom,user,token,extra\n", wantError: "line 2"},
+		{name: "duplicate room", content: "account,User ID,Token\nroom@coscup.org,user,one\nroom@coscup.org,user,two\n", wantError: "duplicates room"},
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("CORS header = %q, want %q", got, "*")
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := loadRoomTokens(writeTokenCSV(t, test.content))
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("loadRoomTokens() error = %v, want containing %q", err, test.wantError)
+			}
+		})
 	}
-	if got := rec.Body.String(); got == "" || got == "\n" {
-		t.Fatal("expected JSON body")
+}
+
+func writeTokenCSV(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "room.csv")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write CSV: %v", err)
 	}
+	return path
 }
