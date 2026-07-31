@@ -1,0 +1,28 @@
+services:
+  dashboard:
+    # Deployment previously required repeating every docker run option manually.
+    # Compose now defaults to the production registry while allowing an explicit override.
+    image: ${IMAGE:-image.prod.tw/rozeta-dashboard:latest}
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - '${HTTP_PORT:-8080}:8080'
+    environment:
+      # Empty credentials previously failed only after the container started. Required
+      # interpolation now reports the missing variable before Compose creates it.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+    volumes:
+      - type: bind
+        source: ${ROOM_TOKEN_FILE:-./room.csv}
+        target: /data/room.csv
+        read_only: true
+    # The application does not write locally or need Linux capabilities. These limits
+    # replace Docker's broader defaults without changing network access to Rozeta.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    pids_limit: 100
+    stop_grace_period: 15s

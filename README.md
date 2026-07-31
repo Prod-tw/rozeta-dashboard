@@ -39,6 +39,17 @@ docker run --rm -p 8080:8080 \
 
 `.github/workflows/container.yml` tests every pull request and builds the image without publishing it. Pushes to `main`, version tags matching `v*`, and manual workflow runs publish `image.prod.tw/rozeta-dashboard` for `linux/amd64` and `linux/arm64`. Configure the registry password as the GitHub Actions repository secret `REGISTRY_PASSWORD`; the workflow injects it only into `docker/login-action` and logs in as `prod`.
 
+To run the published image with Compose, log in to the registry once and inject the required application credentials from the shell:
+
+```sh
+printf '%s' "$REGISTRY_PASSWORD" | docker login image.prod.tw --username prod --password-stdin
+export ADMIN_PASSWORD='replace-with-a-strong-password'
+export SESSION_SECRET='replace-with-at-least-32-random-bytes'
+docker compose up -d
+```
+
+`compose.yaml` mounts `./room.csv` read-only and exposes port `8080`. Override these defaults with `ROOM_TOKEN_FILE`, `HTTP_PORT`, or `IMAGE` as needed. Use `docker compose logs -f dashboard` to inspect startup and `docker compose down` to stop the service.
+
 ## License
 
 MIT
