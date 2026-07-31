@@ -227,6 +227,18 @@ button.loading::after {
 	font-size: 18px;
 }
 
+.panel-header-actions {
+	display: flex;
+	gap: 8px;
+}
+
+.room-visibility-summary {
+	display: block;
+	margin-top: 4px;
+	color: var(--muted);
+	font-size: 0.85rem;
+}
+
 .table-wrap {
 	overflow: auto;
 }
@@ -420,6 +432,119 @@ dialog {
 	box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
 }
 
+#room-picker-dialog {
+	width: min(620px, calc(100% - 32px));
+	max-width: 620px;
+	border-color: var(--line);
+}
+
+.room-picker-dialog {
+	padding: 24px;
+}
+
+.room-picker-header,
+.room-picker-tools {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+}
+
+.room-picker-header h2 {
+	margin: 0;
+}
+
+.room-picker-header > span,
+.room-picker-tools > span {
+	color: var(--muted);
+	font-size: 0.9rem;
+	white-space: nowrap;
+}
+
+.room-picker-search {
+	display: grid;
+	gap: 6px;
+	margin: 20px 0 12px;
+	color: var(--muted);
+}
+
+.room-picker-search input {
+	width: 100%;
+	padding: 0.8rem 0.9rem;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: #0a1325;
+	color: var(--text);
+}
+
+.room-picker-search small {
+	color: var(--muted);
+	font-size: 0.8rem;
+}
+
+.room-picker-search code {
+	color: var(--text);
+}
+
+.room-picker-tools > div {
+	display: flex;
+	gap: 8px;
+}
+
+.room-picker-tools button {
+	padding: 0.55rem 0.75rem;
+}
+
+.room-picker-options {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px;
+	max-height: min(420px, 45vh);
+	margin-top: 12px;
+	padding: 4px;
+	overflow: auto;
+}
+
+.room-picker-option {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+	padding: 11px 12px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: rgba(255, 255, 255, 0.03);
+	cursor: pointer;
+}
+
+.room-picker-option:hover {
+	background: rgba(255, 255, 255, 0.07);
+}
+
+.room-picker-option input {
+	width: 18px;
+	height: 18px;
+	margin: 0;
+	accent-color: var(--accent);
+}
+
+.room-picker-option span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.room-picker-empty {
+	grid-column: 1 / -1;
+	padding: 24px 8px;
+	color: var(--muted);
+	text-align: center;
+}
+
+.primary-action {
+	background: var(--accent);
+}
+
 dialog::backdrop {
 	background: rgba(3, 7, 18, 0.78);
 	backdrop-filter: blur(4px);
@@ -525,5 +650,26 @@ dialog::backdrop {
 
 	.actions {
 		grid-template-columns: 1fr 1fr;
+	}
+
+	.room-list-panel .panel-header,
+	.room-picker-header,
+	.room-picker-tools {
+		align-items: stretch;
+		flex-direction: column;
+	}
+
+	.panel-header-actions {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.room-picker-tools > div {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+	}
+
+	.room-picker-options {
+		grid-template-columns: 1fr;
 	}
 }

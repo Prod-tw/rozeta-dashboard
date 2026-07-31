@@ -3,10 +3,16 @@ const state = {
 	roomMeetings: new Map(),
 	selectedRoom: '',
 	meetingsLoadingFor: '',
+	// Room visibility used to follow the shared server snapshot. Keeping hidden room names separately makes the
+	// display browser-local, preserves the preference across reloads, and leaves newly configured rooms visible.
+	hiddenRooms: new Set(),
+	roomPickerDraft: new Set(),
 	alerts: [],
 	alertTimers: new Map(),
 	nextAlertId: 0,
 }
+
+const roomVisibilityStorageKey = 'coscup-caption.admin-room-visibility.v1'
 
 const roomsBody = document.getElementById('rooms-body')
 const selectedRoomInput = document.getElementById('selected-room')
@@ -19,6 +25,12 @@ const alertsNode = document.getElementById('alerts')
 const wsStatusNode = document.getElementById('ws-status')
 const resumeDialog = document.getElementById('resume-dialog')
 const resumeMeetingName = document.getElementById('resume-meeting-name')
+const roomVisibilitySummary = document.getElementById('room-visibility-summary')
+const roomPickerDialog = document.getElementById('room-picker-dialog')
+const roomPickerSearch = document.getElementById('room-picker-search')
+const roomPickerCount = document.getElementById('room-picker-count')
+const roomPickerResults = document.getElementById('room-picker-results')
+const roomPickerOptions = document.getElementById('room-picker-options')
 
 document.getElementById('refresh-btn').addEventListener('click', () => {
 	void loadRooms()
@@ -43,8 +55,41 @@ document.getElementById('resume-confirm').addEventListener('click', () => {
 	resumeDialog.close()
 	void sendCommand('resume')
 })
+document.getElementById('choose-rooms-btn').addEventListener('click', openRoomPicker)
+document.getElementById('show-room-results').addEventListener('click', () => setRoomPickerResultsVisible(true))
+document.getElementById('show-only-room-results').addEventListener('click', showOnlyRoomPickerResults)
+document.getElementById('hide-room-results').addEventListener('click', () => setRoomPickerResultsVisible(false))
+document.getElementById('room-picker-cancel').addEventListener('click', () => roomPickerDialog.close())
+document.getElementById('room-picker-apply').addEventListener('click', applyRoomPicker)
+document.getElementById('room-picker-form').addEventListener('submit', event => event.preventDefault())
 
 targetMeetingInput.addEventListener('input', renderActions)
+roomPickerSearch.addEventListener('input', renderRoomPicker)
+
+function loadRoomVisibility() {
+	try {
+		const stored = window.localStorage.getItem(roomVisibilityStorageKey)
+		if (!stored) return
+		const preference = JSON.parse(stored)
+		if (preference?.version !== 1 || !Array.isArray(preference.hiddenRooms)) return
+		state.hiddenRooms = new Set(
+			preference.hiddenRooms.map(roomName => String(roomName).trim()).filter(roomName => roomName),
+		)
+	} catch {
+		pushAlert('error', 'Room display settings could not be loaded. All rooms will be shown.')
+	}
+}
+
+function saveRoomVisibility() {
+	try {
+		window.localStorage.setItem(
+			roomVisibilityStorageKey,
+			JSON.stringify({ version: 1, hiddenRooms: Array.from(state.hiddenRooms).sort() }),
+		)
+	} catch {
+		pushAlert('error', 'Room display settings could not be saved. This selection may be lost after a refresh.')
+	}
+}
 
 async function apiFetch(url, options) {
 	const response = await fetch(url, options)
@@ -59,8 +104,9 @@ async function loadRooms() {
 	const response = await apiFetch('/api/rooms')
 	const rooms = await response.json()
 	state.rooms = new Map(rooms.map(room => [room.room_name, room]))
-	if (!state.selectedRoom && rooms[0]) {
-		selectRoom(rooms[0].room_name, true)
+	const firstVisibleRoom = rooms.find(room => !state.hiddenRooms.has(room.room_name))
+	if (!state.selectedRoom && firstVisibleRoom) {
+		selectRoom(firstVisibleRoom.room_name, true)
 		return
 	}
 	render()
@@ -181,12 +227,18 @@ function render() {
 	renderMeetingList()
 	renderActions()
 	renderAlerts()
+	if (roomPickerDialog.open) renderRoomPicker()
 }
 
 function renderRooms() {
-	const rooms = Array.from(state.rooms.values()).sort((a, b) => a.room_name.localeCompare(b.room_name))
+	const allRooms = getSortedRooms()
+	const rooms = allRooms.filter(room => !state.hiddenRooms.has(room.room_name))
+	roomVisibilitySummary.textContent = `Showing ${rooms.length} of ${allRooms.length}`
 	if (!rooms.length) {
-		roomsBody.innerHTML = '<tr><td colspan="5">No configured rooms.</td></tr>'
+		const message = allRooms.length
+			? 'No rooms are selected for display. Use Choose Rooms to update the list.'
+			: 'No configured rooms.'
+		roomsBody.innerHTML = `<tr><td colspan="5">${message}</td></tr>`
 		return
 	}
 	roomsBody.innerHTML = rooms
@@ -298,11 +350,13 @@ function renderActions() {
 }
 
 function renderAlerts() {
-	if (!state.alerts.length) {
-		alertsNode.innerHTML = '<div class="alert-empty">No active alerts.</div>'
+	const alerts = state.alerts.filter(alert => !alert.room_name || !state.hiddenRooms.has(alert.room_name))
+	if (!alerts.length) {
+		const message = state.alerts.length ? 'No active alerts for visible rooms.' : 'No active alerts.'
+		alertsNode.innerHTML = `<div class="alert-empty">${message}</div>`
 		return
 	}
-	alertsNode.innerHTML = state.alerts
+	alertsNode.innerHTML = alerts
 		.map(
 			alert => `
 			<article class="alert ${escapeAttr(alert.level)}">
@@ -319,6 +373,105 @@ function renderAlerts() {
 	alertsNode.querySelectorAll('[data-alert-dismiss]').forEach(button => {
 		button.addEventListener('click', () => removeAlert(Number(button.dataset.alertDismiss)))
 	})
+}
+
+function openRoomPicker() {
+	state.roomPickerDraft = new Set(state.hiddenRooms)
+	roomPickerSearch.value = ''
+	renderRoomPicker()
+	roomPickerDialog.showModal()
+	roomPickerSearch.focus()
+}
+
+function renderRoomPicker() {
+	const rooms = getRoomPickerResults()
+	renderRoomPickerCount()
+	roomPickerResults.textContent = `${rooms.length} matching rooms`
+	if (!rooms.length) {
+		roomPickerOptions.innerHTML = '<div class="room-picker-empty">No rooms match this search.</div>'
+		return
+	}
+	roomPickerOptions.innerHTML = rooms
+		.map(
+			room => `
+				<label class="room-picker-option">
+					<input type="checkbox" data-room-picker="${escapeAttr(room.room_name)}" ${state.roomPickerDraft.has(room.room_name) ? '' : 'checked'} />
+					<span>${escapeHtml(room.room_name)}</span>
+				</label>
+			`,
+		)
+		.join('')
+	roomPickerOptions.querySelectorAll('[data-room-picker]').forEach(checkbox => {
+		checkbox.addEventListener('change', () => {
+			if (checkbox.checked) {
+				state.roomPickerDraft.delete(checkbox.dataset.roomPicker)
+			} else {
+				state.roomPickerDraft.add(checkbox.dataset.roomPicker)
+			}
+			renderRoomPickerCount()
+		})
+	})
+}
+
+function renderRoomPickerCount() {
+	const visibleCount = getSortedRooms().filter(room => !state.roomPickerDraft.has(room.room_name)).length
+	roomPickerCount.textContent = `${visibleCount} selected`
+}
+
+function setRoomPickerResultsVisible(visible) {
+	getRoomPickerResults().forEach(room => {
+		if (visible) {
+			state.roomPickerDraft.delete(room.room_name)
+		} else {
+			state.roomPickerDraft.add(room.room_name)
+		}
+	})
+	renderRoomPicker()
+}
+
+function showOnlyRoomPickerResults() {
+	const matchingRooms = new Set(getRoomPickerResults().map(room => room.room_name))
+	// The existing batch actions changed only matching rooms. Show Only also hides every current non-match while
+	// retaining hidden entries for rooms absent from the server, so a temporarily removed room keeps its preference.
+	getSortedRooms().forEach(room => {
+		if (matchingRooms.has(room.room_name)) {
+			state.roomPickerDraft.delete(room.room_name)
+		} else {
+			state.roomPickerDraft.add(room.room_name)
+		}
+	})
+	renderRoomPicker()
+}
+
+function applyRoomPicker() {
+	state.hiddenRooms = new Set(state.roomPickerDraft)
+	saveRoomVisibility()
+	roomPickerDialog.close()
+	if (state.hiddenRooms.has(state.selectedRoom)) {
+		selectRoom('')
+		return
+	}
+	render()
+}
+
+function getSortedRooms() {
+	return Array.from(state.rooms.values()).sort((a, b) => a.room_name.localeCompare(b.room_name))
+}
+
+function getRoomPickerResults() {
+	const pattern = roomPickerSearch.value.trim()
+	return getSortedRooms().filter(room => !pattern || roomNameMatchesPattern(room.room_name, pattern))
+}
+
+function roomNameMatchesPattern(roomName, pattern) {
+	// Search previously treated every character literally. Only ? and * now act as wildcards; escaping all other
+	// regular-expression syntax keeps the original literal substring behavior safe for room names and user input.
+	const expression = Array.from(pattern, character => {
+		if (character === '?') return '.'
+		if (character === '*') return '.*'
+		return character.replace(/[\\^$.*+?()[\]{}|]/gu, '\\$&')
+	}).join('')
+	return new RegExp(expression, 'iu').test(roomName)
 }
 
 function openResumeConfirmation() {
@@ -382,5 +535,6 @@ function escapeAttr(value) {
 	return escapeHtml(value)
 }
 
+loadRoomVisibility()
 loadRooms().catch(error => pushAlert('error', error.message))
 connectAdminSocket()

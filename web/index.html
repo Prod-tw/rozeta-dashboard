@@ -32,8 +32,14 @@
 			<section class="layout">
 				<section class="panel room-list-panel">
 					<div class="panel-header">
-						<h2>Rooms</h2>
-						<button type="button" id="refresh-btn">Refresh</button>
+						<div>
+							<h2>Rooms</h2>
+							<span class="room-visibility-summary" id="room-visibility-summary">Showing all rooms</span>
+						</div>
+						<div class="panel-header-actions">
+							<button type="button" id="choose-rooms-btn">Choose Rooms</button>
+							<button type="button" id="refresh-btn">Refresh</button>
+						</div>
 					</div>
 					<div class="table-wrap">
 						<table>
@@ -79,6 +85,43 @@
 				</section>
 			</section>
 		</main>
+		<dialog id="room-picker-dialog">
+			<form class="room-picker-dialog" id="room-picker-form">
+				<div class="room-picker-header">
+					<div>
+						<p class="eyebrow">LOCAL DISPLAY SETTING</p>
+						<h2>Choose rooms to show</h2>
+					</div>
+					<span id="room-picker-count"></span>
+				</div>
+				<label class="room-picker-search">
+					<span>Search rooms</span>
+					<input
+						id="room-picker-search"
+						type="search"
+						placeholder="Room name or pattern"
+						autocomplete="off"
+						aria-describedby="room-picker-search-help"
+					/>
+					<small id="room-picker-search-help"
+						><code>?</code> matches one character; <code>*</code> matches any number.</small
+					>
+				</label>
+				<div class="room-picker-tools">
+					<span id="room-picker-results"></span>
+					<div>
+						<button type="button" id="show-room-results">Show Results</button>
+						<button type="button" id="show-only-room-results">Show Only</button>
+						<button type="button" id="hide-room-results">Hide Results</button>
+					</div>
+				</div>
+				<div class="room-picker-options" id="room-picker-options"></div>
+				<div class="dialog-actions">
+					<button type="button" id="room-picker-cancel">Cancel</button>
+					<button type="button" class="primary-action" id="room-picker-apply">Apply</button>
+				</div>
+			</form>
+		</dialog>
 		<dialog id="resume-dialog">
 			<form method="dialog" class="confirm-dialog">
 				<p class="eyebrow">DESTRUCTIVE ACTION</p>
