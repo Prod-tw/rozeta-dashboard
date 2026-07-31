@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+.dockerignore
+Dockerfile
+node_modules
+room.csv
+t.sh
+api_docs
+*.md
+LICENSE
+package.json
+pnpm-lock.yaml
+*_test.go

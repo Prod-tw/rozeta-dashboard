@@ -24,6 +24,21 @@ Run tests with:
 go test ./...
 ```
 
+## Container
+
+Build and run the container with the token CSV mounted read-only. Credentials remain runtime environment variables and are not stored in the image:
+
+```sh
+docker build -t image.prod.tw/rozeta-dashboard:latest .
+docker run --rm -p 8080:8080 \
+  -e ADMIN_PASSWORD \
+  -e SESSION_SECRET \
+  --mount type=bind,src="$(pwd)/room.csv",dst=/data/room.csv,readonly \
+  image.prod.tw/rozeta-dashboard:latest
+```
+
+`.github/workflows/container.yml` tests every pull request and builds the image without publishing it. Pushes to `main`, version tags matching `v*`, and manual workflow runs publish `image.prod.tw/rozeta-dashboard` for `linux/amd64` and `linux/arm64`. Configure the registry password as the GitHub Actions repository secret `REGISTRY_PASSWORD`; the workflow injects it only into `docker/login-action` and logs in as `prod`.
+
 ## License
 
 MIT
