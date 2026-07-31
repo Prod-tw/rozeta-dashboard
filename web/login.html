@@ -1,20 +1,20 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-Hant-TW">
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>Sign in | Rozeta Remote</title>
+		<title>登入 | Rozeta 遠端管理</title>
 		<link rel="stylesheet" href="/assets/styles.css" />
 	</head>
 
 	<body class="login-page">
 		<main class="login-card">
-			<p class="eyebrow">COSCUP OPERATIONS</p>
-			<h1>Room control</h1>
-			<p class="login-copy">Enter the shared operations password to manage Rozeta rooms.</p>
+			<p class="eyebrow">COSCUP 維運中心</p>
+			<h1>房間控制</h1>
+			<p class="login-copy">輸入共用維運密碼以管理 Rozeta 房間。</p>
 			<form id="login-form">
 				<label>
-					<span>Password</span>
+					<span>密碼</span>
 					<input
 						id="password"
 						name="password"
@@ -22,12 +22,16 @@
 						autocomplete="current-password"
 						required
 						autofocus
+						data-tooltip="輸入共用維運密碼；按 Enter 也可以登入。"
 					/>
 				</label>
-				<button type="submit" id="login-button"><span>Sign in</span></button>
+				<button type="submit" id="login-button" data-tooltip="使用輸入的密碼登入管理介面。">
+					<span>登入</span>
+				</button>
 				<p class="form-error" id="login-error" role="alert"></p>
 			</form>
 		</main>
+		<script src="/assets/tooltips.js" defer></script>
 		<script src="/assets/login.js" defer></script>
 	</body>
 </html>

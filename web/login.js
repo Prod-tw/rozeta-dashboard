@@ -3,6 +3,13 @@ const passwordInput = document.getElementById('password')
 const loginButton = document.getElementById('login-button')
 const errorNode = document.getElementById('login-error')
 
+const loginErrorMessages = {
+	'too many login attempts': '登入嘗試次數過多，請稍後再試。',
+	'invalid login request': '登入資料格式不正確。',
+	'invalid password': '密碼不正確。',
+	'failed to create session': '無法建立登入階段，請稍後再試。',
+}
+
 form.addEventListener('submit', async event => {
 	event.preventDefault()
 	loginButton.disabled = true
@@ -17,11 +24,12 @@ form.addEventListener('submit', async event => {
 		})
 		const body = await response.json().catch(() => null)
 		if (!response.ok) {
-			throw new Error(body?.error || 'Sign in failed')
+			throw new Error(body?.error || 'sign in failed')
 		}
 		window.location.assign('/')
 	} catch (error) {
-		errorNode.textContent = error instanceof Error ? error.message : String(error)
+		const message = error instanceof Error ? error.message : String(error)
+		errorNode.textContent = loginErrorMessages[message] || `登入失敗。技術資訊：${message}`
 		loginButton.disabled = false
 		loginButton.classList.remove('loading')
 		passwordInput.select()

@@ -171,9 +171,10 @@ func (a *app) router() (*gin.Engine, error) {
 
 func (a *app) handleAsset(c *gin.Context) {
 	contentTypes := map[string]string{
-		"app.js":     "text/javascript; charset=utf-8",
-		"login.js":   "text/javascript; charset=utf-8",
-		"styles.css": "text/css; charset=utf-8",
+		"app.js":      "text/javascript; charset=utf-8",
+		"login.js":    "text/javascript; charset=utf-8",
+		"styles.css":  "text/css; charset=utf-8",
+		"tooltips.js": "text/javascript; charset=utf-8",
 	}
 	name := c.Param("name")
 	contentType, ok := contentTypes[name]

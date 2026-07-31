@@ -14,6 +14,55 @@ const state = {
 
 const roomVisibilityStorageKey = 'coscup-caption.admin-room-visibility.v1'
 
+const meetingStatusLabels = {
+	unknown: '未知',
+	ready: '可用',
+	in_progress: '進行中',
+	paused: '已暫停',
+	completed: '已完成',
+}
+const apiStatusLabels = {
+	syncing: '同步中',
+	synced: '已同步',
+	stale: '同步失敗',
+	authentication_error: '驗證失敗',
+}
+const actionLabels = {
+	goto: '切換會議',
+	start: '開始',
+	pause: '暫停',
+	resume: '重設會議',
+}
+const commandResultLabels = {
+	pending: '執行中',
+	confirmed: '已確認',
+	failed: '失敗',
+	confirmation_timeout: '確認逾時',
+	confirmed_late: '延遲確認成功',
+}
+const alertLevelLabels = {
+	info: '資訊',
+	error: '錯誤',
+}
+const knownErrorMessages = {
+	'authentication required': '登入狀態已失效，請重新登入。',
+	'meeting lookup failed': '無法取得會議清單。',
+	'command update': '指令狀態已更新。',
+	'unknown room': '找不到指定的房間。',
+	'invalid command request': '指令內容格式不正確。',
+	'unsupported action': '不支援這項操作。',
+	'target meeting is required': '請指定會議 ID。',
+	'failed to verify completed meeting': '無法確認會議是否已完成。',
+	'only completed meetings can be resumed': '只有已完成的會議可以重設。',
+	'room already has a pending command': '這個房間已有指令正在執行。',
+	'room meeting state is not ready': '房間的會議狀態尚未就緒。',
+	'current meeting is unknown; send goto first': '無法判斷目前會議，請先執行「切換會議」。',
+	'command confirmation timed out': '等待指令結果逾時。',
+	'current goto meeting was not found in Rozeta': 'Rozeta 中找不到目前切換的會議。',
+	'multiple in-progress meetings; send goto first': '有多場進行中的會議，請先執行「切換會議」。',
+	'multiple paused meetings; send goto first': '有多場已暫停的會議，請先執行「切換會議」。',
+}
+
 const roomsBody = document.getElementById('rooms-body')
 const selectedRoomInput = document.getElementById('selected-room')
 const selectedRoomLabel = document.getElementById('selected-room-label')
@@ -76,7 +125,7 @@ function loadRoomVisibility() {
 			preference.hiddenRooms.map(roomName => String(roomName).trim()).filter(roomName => roomName),
 		)
 	} catch {
-		pushAlert('error', 'Room display settings could not be loaded. All rooms will be shown.')
+		pushAlert('error', '無法載入房間顯示設定，將顯示所有房間。')
 	}
 }
 
@@ -87,7 +136,7 @@ function saveRoomVisibility() {
 			JSON.stringify({ version: 1, hiddenRooms: Array.from(state.hiddenRooms).sort() }),
 		)
 	} catch {
-		pushAlert('error', 'Room display settings could not be saved. This selection may be lost after a refresh.')
+		pushAlert('error', '無法儲存房間顯示設定，重新整理後可能會遺失這次選擇。')
 	}
 }
 
@@ -135,7 +184,9 @@ async function loadRoomMeetings(roomName) {
 		}
 		state.roomMeetings.set(normalizedRoom, body.meetings || [])
 	} catch (error) {
-		pushAlert('error', error instanceof Error ? error.message : String(error), { room_name: normalizedRoom })
+		pushAlert('error', localizeError(error instanceof Error ? error.message : String(error)), {
+			room_name: normalizedRoom,
+		})
 	} finally {
 		if (state.meetingsLoadingFor === normalizedRoom) {
 			state.meetingsLoadingFor = ''
@@ -146,18 +197,18 @@ async function loadRoomMeetings(roomName) {
 
 function connectAdminSocket() {
 	const socket = new WebSocket(`${location.origin.replace(/^http/, 'ws')}/ws/admin`)
-	wsStatusNode.textContent = 'connecting'
+	wsStatusNode.textContent = '連線中'
 	socket.addEventListener('open', () => {
-		wsStatusNode.textContent = 'connected'
+		wsStatusNode.textContent = '已連線'
 	})
 	socket.addEventListener('close', () => {
-		wsStatusNode.textContent = 'disconnected'
+		wsStatusNode.textContent = '已中斷，正在重新連線'
 		void loadRooms()
 			.catch(() => {})
 			.finally(() => window.setTimeout(connectAdminSocket, 2000))
 	})
 	socket.addEventListener('error', () => {
-		wsStatusNode.textContent = 'error'
+		wsStatusNode.textContent = '連線錯誤'
 	})
 	socket.addEventListener('message', event => {
 		let message
@@ -183,7 +234,7 @@ function handleMessage(message) {
 			}
 			break
 		case 'alert':
-			pushAlert(message.level || 'error', message.message || 'command update', message.room)
+			pushAlert(message.level || 'error', localizeError(message.message || 'command update'), message.room)
 			if (message.room?.room_name) {
 				state.rooms.set(message.room.room_name, message.room)
 				render()
@@ -233,11 +284,11 @@ function render() {
 function renderRooms() {
 	const allRooms = getSortedRooms()
 	const rooms = allRooms.filter(room => !state.hiddenRooms.has(room.room_name))
-	roomVisibilitySummary.textContent = `Showing ${rooms.length} of ${allRooms.length}`
+	roomVisibilitySummary.textContent = `顯示 ${rooms.length} / ${allRooms.length} 個房間`
 	if (!rooms.length) {
 		const message = allRooms.length
-			? 'No rooms are selected for display. Use Choose Rooms to update the list.'
-			: 'No configured rooms.'
+			? '目前沒有選擇要顯示的房間，請使用「選擇房間」更新清單。'
+			: '尚未設定任何房間。'
 		roomsBody.innerHTML = `<tr><td colspan="5">${message}</td></tr>`
 		return
 	}
@@ -245,10 +296,10 @@ function renderRooms() {
 		.map(room => {
 			const selected = room.room_name === state.selectedRoom ? 'selected' : ''
 			return `
-				<tr class="${selected}" data-room="${escapeAttr(room.room_name)}">
+				<tr class="${selected}" data-room="${escapeAttr(room.room_name)}" tabindex="0" aria-selected="${selected ? 'true' : 'false'}" aria-label="選擇 ${escapeAttr(room.room_name)} 並載入會議清單" data-tooltip="選擇 ${escapeAttr(room.room_name)} 並載入會議清單。">
 					<td>${escapeHtml(room.room_name)}</td>
-					<td><span class="status ${escapeAttr(room.status || 'unknown')}">${escapeHtml(room.status || 'unknown')}</span></td>
-					<td><span class="status ${escapeAttr(room.api_status || 'syncing')}">${escapeHtml(room.api_status || 'syncing')}</span></td>
+					<td><span class="status ${escapeAttr(room.status || 'unknown')}">${escapeHtml(labelFor(meetingStatusLabels, room.status, 'unknown'))}</span></td>
+					<td><span class="status ${escapeAttr(room.api_status || 'syncing')}">${escapeHtml(labelFor(apiStatusLabels, room.api_status, 'syncing'))}</span></td>
 					<td>${escapeHtml(resolveCurrentMeetingName(room))}</td>
 					<td>${formatTimestamp(room.last_synced_at)}</td>
 				</tr>
@@ -257,42 +308,47 @@ function renderRooms() {
 		.join('')
 	roomsBody.querySelectorAll('tr[data-room]').forEach(row => {
 		row.addEventListener('click', () => selectRoom(row.dataset.room, true))
+		row.addEventListener('keydown', event => {
+			if (event.key !== 'Enter' && event.key !== ' ') return
+			event.preventDefault()
+			selectRoom(row.dataset.room, true)
+		})
 	})
 }
 
 function renderDetails() {
 	const room = state.rooms.get(state.selectedRoom)
-	selectedRoomLabel.textContent = room ? `Selected: ${room.room_name}` : 'No room selected'
+	selectedRoomLabel.textContent = room ? `已選擇：${room.room_name}` : '尚未選擇房間'
 	if (!room) {
-		roomDetails.textContent = 'Select a room to see details.'
+		roomDetails.textContent = '請選擇房間以查看詳細資訊。'
 		return
 	}
 	roomDetails.textContent = [
-		`meeting status: ${room.status || 'unknown'}`,
-		`API status: ${room.api_status || 'syncing'}`,
-		`current meeting: ${resolveCurrentMeetingName(room)}`,
-		`last sync: ${formatTimestamp(room.last_synced_at)}`,
-		`last command: ${room.last_command_action || '—'} / ${room.last_command_result || '—'}`,
-		`last error: ${room.last_error || '—'}`,
+		`會議狀態：${labelFor(meetingStatusLabels, room.status, 'unknown')}`,
+		`API 狀態：${labelFor(apiStatusLabels, room.api_status, 'syncing')}`,
+		`目前會議：${resolveCurrentMeetingName(room)}`,
+		`上次同步：${formatTimestamp(room.last_synced_at)}`,
+		`上次指令：${room.last_command_action ? labelFor(actionLabels, room.last_command_action) : '—'} / ${room.last_command_result ? labelFor(commandResultLabels, room.last_command_result) : '—'}`,
+		`上次錯誤：${room.last_error ? localizeError(room.last_error) : '—'}`,
 	].join('\n')
 }
 
 function renderMeetingList() {
 	const roomName = state.selectedRoom
 	if (!roomName || !state.rooms.has(roomName)) {
-		meetingsStatus.textContent = 'Select a room'
-		roomMeetings.innerHTML = '<div class="meeting-empty">Select a room to load meetings.</div>'
+		meetingsStatus.textContent = '請選擇房間'
+		roomMeetings.innerHTML = '<div class="meeting-empty">請選擇房間以載入會議。</div>'
 		return
 	}
 	const meetings = state.roomMeetings.get(roomName) || []
 	if (state.meetingsLoadingFor === roomName) {
-		meetingsStatus.textContent = 'Loading meetings...'
-		roomMeetings.innerHTML = '<div class="meeting-empty">Loading meetings from Rozeta.</div>'
+		meetingsStatus.textContent = '正在載入會議…'
+		roomMeetings.innerHTML = '<div class="meeting-empty">正在從 Rozeta 載入會議。</div>'
 		return
 	}
-	meetingsStatus.textContent = `${meetings.length} meetings`
+	meetingsStatus.textContent = `${meetings.length} 場會議`
 	if (!meetings.length) {
-		roomMeetings.innerHTML = '<div class="meeting-empty">No meetings found for this room.</div>'
+		roomMeetings.innerHTML = '<div class="meeting-empty">這個房間沒有會議。</div>'
 		return
 	}
 	const targetID = targetMeetingInput.value.trim()
@@ -301,12 +357,12 @@ function renderMeetingList() {
 			const selected = meeting.id === targetID ? 'selected' : ''
 			const meta = [
 				meeting.id,
-				meeting.status,
+				labelFor(meetingStatusLabels, meeting.status),
 				meeting.source_language || '—',
 				meeting.target_language || '—',
 			].join(' · ')
 			return `
-				<button type="button" class="meeting-item ${selected}" data-meeting-id="${escapeAttr(meeting.id)}">
+				<button type="button" class="meeting-item ${selected}" data-meeting-id="${escapeAttr(meeting.id)}" data-tooltip="選擇這場會議，供「切換會議」或「重設會議」使用。">
 					<span class="meeting-title">${escapeHtml(meeting.title || meeting.id)}</span>
 					<span class="meeting-meta">${escapeHtml(meta)}</span>
 				</button>
@@ -346,13 +402,20 @@ function renderActions() {
 		} else {
 			button.disabled = !canControl
 		}
+		const tooltipAnchor = document.querySelector(`[data-action-tooltip="${action}"]`)
+		const tooltip = getActionTooltip(action, room, selectedMeeting, targetID, pending)
+		button.dataset.tooltip = tooltip
+		tooltipAnchor.dataset.tooltip = tooltip
+		// Disabled buttons previously could not receive keyboard focus, hiding why an action was unavailable. The wrapper
+		// now enters the tab order only while disabled; enabled buttons remain the single interactive focus target.
+		tooltipAnchor.tabIndex = button.disabled ? 0 : -1
 	})
 }
 
 function renderAlerts() {
 	const alerts = state.alerts.filter(alert => !alert.room_name || !state.hiddenRooms.has(alert.room_name))
 	if (!alerts.length) {
-		const message = state.alerts.length ? 'No active alerts for visible rooms.' : 'No active alerts.'
+		const message = state.alerts.length ? '目前顯示的房間沒有通知。' : '目前沒有通知。'
 		alertsNode.innerHTML = `<div class="alert-empty">${message}</div>`
 		return
 	}
@@ -361,11 +424,11 @@ function renderAlerts() {
 			alert => `
 			<article class="alert ${escapeAttr(alert.level)}">
 				<div class="alert-copy">
-					<span class="alert-level">${escapeHtml(alert.level)}</span>
+					<span class="alert-level">${escapeHtml(labelFor(alertLevelLabels, alert.level))}</span>
 					${alert.room_name ? `<span class="alert-room">${escapeHtml(alert.room_name)}</span>` : ''}
 					<p>${escapeHtml(alert.message)}</p>
 				</div>
-				${alert.level === 'error' ? `<button type="button" class="alert-dismiss" data-alert-dismiss="${alert.id}">Dismiss</button>` : ''}
+				${alert.level === 'error' ? `<button type="button" class="alert-dismiss" data-alert-dismiss="${alert.id}" data-tooltip="關閉這則錯誤通知。">關閉</button>` : ''}
 			</article>
 		`,
 		)
@@ -386,16 +449,16 @@ function openRoomPicker() {
 function renderRoomPicker() {
 	const rooms = getRoomPickerResults()
 	renderRoomPickerCount()
-	roomPickerResults.textContent = `${rooms.length} matching rooms`
+	roomPickerResults.textContent = `符合條件：${rooms.length} 個房間`
 	if (!rooms.length) {
-		roomPickerOptions.innerHTML = '<div class="room-picker-empty">No rooms match this search.</div>'
+		roomPickerOptions.innerHTML = '<div class="room-picker-empty">沒有符合搜尋條件的房間。</div>'
 		return
 	}
 	roomPickerOptions.innerHTML = rooms
 		.map(
 			room => `
-				<label class="room-picker-option">
-					<input type="checkbox" data-room-picker="${escapeAttr(room.room_name)}" ${state.roomPickerDraft.has(room.room_name) ? '' : 'checked'} />
+				<label class="room-picker-option" data-tooltip="控制是否在房間表格顯示 ${escapeAttr(room.room_name)}。">
+					<input type="checkbox" data-room-picker="${escapeAttr(room.room_name)}" data-tooltip="控制是否在房間表格顯示 ${escapeAttr(room.room_name)}。" ${state.roomPickerDraft.has(room.room_name) ? '' : 'checked'} />
 					<span>${escapeHtml(room.room_name)}</span>
 				</label>
 			`,
@@ -415,7 +478,7 @@ function renderRoomPicker() {
 
 function renderRoomPickerCount() {
 	const visibleCount = getSortedRooms().filter(room => !state.roomPickerDraft.has(room.room_name)).length
-	roomPickerCount.textContent = `${visibleCount} selected`
+	roomPickerCount.textContent = `已選擇 ${visibleCount} 個房間`
 }
 
 function setRoomPickerResultsVisible(visible) {
@@ -485,7 +548,7 @@ async function sendCommand(action) {
 	const roomName = state.selectedRoom
 	const targetMeetingId = targetMeetingInput.value.trim()
 	if (!roomName) {
-		pushAlert('error', 'Select a room first')
+		pushAlert('error', '請先選擇房間。')
 		return
 	}
 	try {
@@ -496,11 +559,13 @@ async function sendCommand(action) {
 		})
 		const body = await response.json().catch(() => null)
 		if (!response.ok) {
-			throw new Error(body?.error || `Command failed for ${roomName}`)
+			throw new Error(body?.error || `無法對 ${roomName} 執行指令。`)
 		}
 		await loadRooms()
 	} catch (error) {
-		pushAlert('error', error instanceof Error ? error.message : String(error), { room_name: roomName })
+		pushAlert('error', localizeError(error instanceof Error ? error.message : String(error)), {
+			room_name: roomName,
+		})
 	}
 }
 
@@ -519,7 +584,55 @@ function resolveCurrentMeetingName(room) {
 function formatTimestamp(value) {
 	if (!value || value.startsWith('0001-')) return '—'
 	const date = new Date(value)
-	return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString()
+	return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString('zh-TW')
+}
+
+function labelFor(labels, value, fallback = '') {
+	const normalized = String(value || fallback)
+	return labels[normalized] || normalized || '—'
+}
+
+function localizeError(message) {
+	const normalized = String(message || '').trim()
+	if (!normalized) return '發生未知錯誤。'
+	if (knownErrorMessages[normalized]) return knownErrorMessages[normalized]
+	if (/\p{Script=Han}/u.test(normalized)) return normalized
+
+	const commandMatch = normalized.match(
+		/^(goto|start|pause|resume) (pending|confirmed|failed|confirmation_timeout|confirmed_late) for (.+)$/u,
+	)
+	if (commandMatch) {
+		return `${labelFor(actionLabels, commandMatch[1])}：${labelFor(commandResultLabels, commandMatch[2])}（${commandMatch[3]}）`
+	}
+	const lateMatch = normalized.match(/^(goto|start|pause|resume) confirmed late for (.+)$/u)
+	if (lateMatch) return `${labelFor(actionLabels, lateMatch[1])}：延遲確認成功（${lateMatch[2]}）`
+
+	const timeoutPrefix = 'command confirmation timed out: '
+	if (normalized.startsWith(timeoutPrefix)) {
+		return `等待指令結果逾時。技術資訊：${normalized.slice(timeoutPrefix.length)}`
+	}
+	return `系統或 Rozeta 回報錯誤。技術資訊：${normalized}`
+}
+
+function getActionTooltip(action, room, selectedMeeting, targetID, pending) {
+	if (pending) return '這個房間已有指令正在執行，請等待完成。'
+	if (!room) return '請先從房間表格選擇房間。'
+	if (action === 'goto') {
+		if (!targetID) return '請輸入會議 ID，或從會議清單選取一場會議。'
+		if (room.api_status === 'syncing') return '房間仍在同步中，請稍候。'
+		if (room.api_status === 'authentication_error') return 'Rozeta 驗證失敗，無法切換會議。'
+		return '將指定會議設為這個房間的目前會議。'
+	}
+	if (action === 'resume') {
+		if (!selectedMeeting) return '請從會議清單選取一場已完成的會議。'
+		if (selectedMeeting.status !== 'completed') return '只有已完成的會議可以重設。'
+		if (room.api_status !== 'synced') return '房間尚未完成同步，無法重設會議。'
+		return '永久刪除已完成會議的逐字稿與翻譯，並重設為可用狀態。'
+	}
+	if (room.api_status !== 'synced') return '房間尚未完成同步，無法執行這項指令。'
+	if (!room.current_meeting_id) return '無法判斷目前會議，請先執行「切換會議」。'
+	if (room.status === 'completed') return '目前會議已完成，無法開始或暫停。'
+	return action === 'start' ? '開始目前房間的目前會議。' : '暫停目前房間的目前會議。'
 }
 
 function escapeHtml(value) {
@@ -536,5 +649,5 @@ function escapeAttr(value) {
 }
 
 loadRoomVisibility()
-loadRooms().catch(error => pushAlert('error', error.message))
+loadRooms().catch(error => pushAlert('error', localizeError(error.message)))
 connectAdminSocket()

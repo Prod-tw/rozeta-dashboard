@@ -71,6 +71,34 @@ func TestPageAndWebSocketRequireAdminSession(t *testing.T) {
 	}
 }
 
+func TestPublicAssetAllowlist(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
+	router, err := a.router()
+	if err != nil {
+		t.Fatalf("router() error = %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+	}{
+		{name: "tooltip script is public", path: "/assets/tooltips.js", wantStatus: http.StatusOK},
+		{name: "embedded admin page stays protected", path: "/assets/index.html", wantStatus: http.StatusNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.wantStatus)
+			}
+		})
+	}
+}
+
 func TestLoginCreatesSecureFixedSession(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))

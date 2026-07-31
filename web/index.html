@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-Hant-TW">
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>Rozeta Remote Management</title>
+		<title>Rozeta 遠端管理</title>
 		<link rel="stylesheet" href="/assets/styles.css" />
 	</head>
 
@@ -11,45 +11,53 @@
 		<main class="app-shell">
 			<header class="topbar">
 				<div>
-					<p class="eyebrow">COSCUP OPERATIONS</p>
-					<h1>Rozeta Remote Management</h1>
-					<p>Direct API control and meeting-state confirmation.</p>
+					<p class="eyebrow">COSCUP 維運中心</p>
+					<h1>Rozeta 遠端管理</h1>
+					<p>直接控制 API 並確認會議狀態。</p>
 				</div>
 				<div class="topbar-actions">
-					<div class="connection-pill" id="ws-status">connecting</div>
-					<button type="button" id="logout-btn">Logout</button>
+					<div class="connection-pill" id="ws-status" role="status" aria-live="polite">連線中</div>
+					<button type="button" id="logout-btn" data-tooltip="登出管理介面並返回登入頁。">登出</button>
 				</div>
 			</header>
 
 			<section class="panel alert-panel">
 				<div class="panel-header">
-					<h2>Alerts</h2>
-					<span>Command outcomes and Rozeta API failures.</span>
+					<h2>通知</h2>
+					<span>顯示指令結果與 Rozeta API 錯誤。</span>
 				</div>
-				<div class="alerts" id="alerts"></div>
+				<div class="alerts" id="alerts" aria-live="polite"></div>
 			</section>
 
 			<section class="layout">
 				<section class="panel room-list-panel">
 					<div class="panel-header">
 						<div>
-							<h2>Rooms</h2>
-							<span class="room-visibility-summary" id="room-visibility-summary">Showing all rooms</span>
+							<h2>房間</h2>
+							<span class="room-visibility-summary" id="room-visibility-summary">顯示所有房間</span>
 						</div>
 						<div class="panel-header-actions">
-							<button type="button" id="choose-rooms-btn">Choose Rooms</button>
-							<button type="button" id="refresh-btn">Refresh</button>
+							<button type="button" id="choose-rooms-btn" data-tooltip="選擇要在這個瀏覽器顯示的房間。">
+								選擇房間
+							</button>
+							<button
+								type="button"
+								id="refresh-btn"
+								data-tooltip="立即重新載入房間與目前房間的會議資料。"
+							>
+								重新整理
+							</button>
 						</div>
 					</div>
 					<div class="table-wrap">
 						<table>
 							<thead>
 								<tr>
-									<th>Room</th>
-									<th>Meeting</th>
+									<th>房間</th>
+									<th>會議狀態</th>
 									<th>API</th>
-									<th>Current Meeting</th>
-									<th>Last Sync</th>
+									<th>目前會議</th>
+									<th>上次同步</th>
 								</tr>
 							</thead>
 							<tbody id="rooms-body"></tbody>
@@ -59,83 +67,164 @@
 
 				<section class="panel command-panel">
 					<div class="panel-header">
-						<h2>Command</h2>
-						<span id="selected-room-label">No room selected</span>
+						<h2>指令</h2>
+						<span id="selected-room-label">尚未選擇房間</span>
 					</div>
 					<label>
-						<span>Room Name</span>
-						<input id="selected-room" type="text" placeholder="Select from the room table" readonly />
+						<span>房間名稱</span>
+						<input
+							id="selected-room"
+							type="text"
+							placeholder="請從房間表格選擇"
+							readonly
+							data-tooltip="顯示目前從房間表格選取的房間。"
+						/>
 					</label>
 					<label>
-						<span>Meeting ID</span>
-						<input id="target-meeting" type="text" placeholder="B0e44K6Iav" />
+						<span>會議 ID</span>
+						<input
+							id="target-meeting"
+							type="text"
+							placeholder="B0e44K6Iav"
+							data-tooltip="輸入會議 ID，或從下方會議清單選取。"
+						/>
 					</label>
 					<div class="actions">
-						<button type="button" data-action="goto"><span>Goto</span></button>
-						<button type="button" data-action="start"><span>Start</span></button>
-						<button type="button" data-action="pause"><span>Pause</span></button>
-						<button type="button" class="danger-action" data-action="resume"><span>Resume</span></button>
+						<span
+							class="tooltip-anchor"
+							tabindex="0"
+							data-action-tooltip="goto"
+							data-tooltip="將指定會議設為這個房間的目前會議。"
+							><button
+								type="button"
+								data-action="goto"
+								data-tooltip="將指定會議設為這個房間的目前會議。"
+								disabled
+							>
+								<span>切換會議</span>
+							</button></span
+						>
+						<span
+							class="tooltip-anchor"
+							tabindex="0"
+							data-action-tooltip="start"
+							data-tooltip="開始目前房間的目前會議。"
+							><button type="button" data-action="start" data-tooltip="開始目前房間的目前會議。" disabled>
+								<span>開始</span>
+							</button></span
+						>
+						<span
+							class="tooltip-anchor"
+							tabindex="0"
+							data-action-tooltip="pause"
+							data-tooltip="暫停目前房間的目前會議。"
+							><button type="button" data-action="pause" data-tooltip="暫停目前房間的目前會議。" disabled>
+								<span>暫停</span>
+							</button></span
+						>
+						<span
+							class="tooltip-anchor"
+							tabindex="0"
+							data-action-tooltip="resume"
+							data-tooltip="永久刪除已完成會議的逐字稿與翻譯，並重設為可用狀態。"
+							><button
+								type="button"
+								class="danger-action"
+								data-action="resume"
+								data-tooltip="永久刪除已完成會議的逐字稿與翻譯，並重設為可用狀態。"
+								disabled
+							>
+								<span>重設會議</span>
+							</button></span
+						>
 					</div>
 					<div class="details" id="room-details"></div>
 					<div class="meeting-list-header">
-						<h3>Meetings</h3>
-						<span id="meetings-status">Select a room</span>
+						<h3>會議</h3>
+						<span id="meetings-status">請選擇房間</span>
 					</div>
 					<div class="meeting-list" id="room-meetings"></div>
 				</section>
 			</section>
 		</main>
-		<dialog id="room-picker-dialog">
+		<dialog id="room-picker-dialog" aria-labelledby="room-picker-title" aria-describedby="room-picker-description">
 			<form class="room-picker-dialog" id="room-picker-form">
 				<div class="room-picker-header">
 					<div>
-						<p class="eyebrow">LOCAL DISPLAY SETTING</p>
-						<h2>Choose rooms to show</h2>
+						<p class="eyebrow">本機顯示設定</p>
+						<h2 id="room-picker-title">選擇要顯示的房間</h2>
+						<p class="sr-only" id="room-picker-description">這項設定只會儲存在目前的瀏覽器。</p>
 					</div>
 					<span id="room-picker-count"></span>
 				</div>
 				<label class="room-picker-search">
-					<span>Search rooms</span>
+					<span>搜尋房間</span>
 					<input
 						id="room-picker-search"
 						type="search"
-						placeholder="Room name or pattern"
+						placeholder="房間名稱或樣式"
 						autocomplete="off"
 						aria-describedby="room-picker-search-help"
+						data-tooltip="依房間名稱搜尋；可以使用 ? 與 * 萬用字元。"
 					/>
 					<small id="room-picker-search-help"
-						><code>?</code> matches one character; <code>*</code> matches any number.</small
+						><code>?</code> 代表一個字元；<code>*</code> 代表任意數量的字元。</small
 					>
 				</label>
 				<div class="room-picker-tools">
 					<span id="room-picker-results"></span>
 					<div>
-						<button type="button" id="show-room-results">Show Results</button>
-						<button type="button" id="show-only-room-results">Show Only</button>
-						<button type="button" id="hide-room-results">Hide Results</button>
+						<button type="button" id="show-room-results" data-tooltip="顯示所有符合目前搜尋條件的房間。">
+							顯示結果
+						</button>
+						<button
+							type="button"
+							id="show-only-room-results"
+							data-tooltip="只顯示符合搜尋條件的房間，隱藏其他房間。"
+						>
+							只顯示結果
+						</button>
+						<button type="button" id="hide-room-results" data-tooltip="隱藏所有符合目前搜尋條件的房間。">
+							隱藏結果
+						</button>
 					</div>
 				</div>
 				<div class="room-picker-options" id="room-picker-options"></div>
 				<div class="dialog-actions">
-					<button type="button" id="room-picker-cancel">Cancel</button>
-					<button type="button" class="primary-action" id="room-picker-apply">Apply</button>
+					<button type="button" id="room-picker-cancel" data-tooltip="放棄這次變更並關閉視窗。">取消</button>
+					<button
+						type="button"
+						class="primary-action"
+						id="room-picker-apply"
+						data-tooltip="將房間顯示設定儲存在目前的瀏覽器。"
+					>
+						套用
+					</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="resume-dialog">
+		<dialog id="resume-dialog" aria-labelledby="resume-dialog-title" aria-describedby="resume-dialog-description">
 			<form method="dialog" class="confirm-dialog">
-				<p class="eyebrow">DESTRUCTIVE ACTION</p>
-				<h2>Resume completed meeting?</h2>
-				<p>
-					Rozeta will permanently delete all transcriptions and translations for
-					<strong id="resume-meeting-name"></strong>, then reset it to ready.
+				<p class="eyebrow">破壞性操作</p>
+				<h2 id="resume-dialog-title">要重設已完成的會議嗎？</h2>
+				<p id="resume-dialog-description">
+					Rozeta 將永久刪除
+					<strong id="resume-meeting-name"></strong> 的所有逐字稿與翻譯，然後重設為可用狀態。
 				</p>
 				<div class="dialog-actions">
-					<button type="submit" value="cancel">Cancel</button>
-					<button type="button" class="danger-action" id="resume-confirm">Confirm Resume</button>
+					<button type="submit" value="cancel" data-tooltip="取消重設並保留所有會議資料。">取消</button>
+					<button
+						type="button"
+						class="danger-action"
+						id="resume-confirm"
+						data-tooltip="永久刪除逐字稿與翻譯，並將會議重設為可用狀態。"
+					>
+						確認重設
+					</button>
 				</div>
 			</form>
 		</dialog>
+		<script src="/assets/tooltips.js" defer></script>
 		<script src="/assets/app.js" defer></script>
 	</body>
 </html>
