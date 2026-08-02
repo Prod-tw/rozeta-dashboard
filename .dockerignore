@@ -4,7 +4,7 @@
 .dockerignore
 Dockerfile
 node_modules
-room.csv
+account.csv
 t.sh
 api_docs
 *.md

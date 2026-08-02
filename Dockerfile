@@ -30,7 +30,7 @@ USER 65532:65532
 
 EXPOSE 8080
 
-# Room credentials were previously read directly from the checkout. They remain
-# runtime-only data and must be mounted at /data/room.csv instead of entering the image.
+# Account credentials were previously read directly from the checkout. They remain
+# runtime-only data and are now mounted as /data/account.csv instead of entering the image.
 ENTRYPOINT ["/rozeta-dashboard"]
-CMD ["-token-file", "/data/room.csv"]
+CMD ["-account", "/data/account.csv"]

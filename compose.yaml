@@ -14,8 +14,10 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
     volumes:
       - type: bind
-        source: ${ROOM_TOKEN_FILE:-./room.csv}
-        target: /data/room.csv
+        # The old room.csv mount followed the removed -token-file option. Keep the
+        # runtime-only mount while using the new account.csv and -account naming.
+        source: ${ACCOUNT_FILE:-./account.csv}
+        target: /data/account.csv
         read_only: true
     # The application does not write locally or need Linux capabilities. These limits
     # replace Docker's broader defaults without changing network access to Rozeta.

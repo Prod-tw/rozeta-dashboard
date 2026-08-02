@@ -49,11 +49,13 @@ type app struct {
 }
 
 func main() {
-	tokenFile := flag.String("token-file", "", "path to required room token CSV file")
+	// The generic account filename replaces the previous room-token-specific CLI name
+	// so operators now provide the required credentials with -account.
+	accountFile := flag.String("account", "", "path to required account CSV file")
 	flag.Parse()
 
-	if strings.TrimSpace(*tokenFile) == "" {
-		log.Fatal("-token-file is required")
+	if strings.TrimSpace(*accountFile) == "" {
+		log.Fatal("-account is required")
 	}
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
 	if adminPassword == "" {
@@ -63,7 +65,7 @@ func main() {
 	if len(sessionSecret) < 32 {
 		log.Fatal("SESSION_SECRET must contain at least 32 bytes")
 	}
-	tokens, err := loadRoomTokens(*tokenFile)
+	tokens, err := loadRoomTokens(*accountFile)
 	if err != nil {
 		log.Fatalf("load token file: %v", err)
 	}

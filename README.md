@@ -9,7 +9,7 @@ Use Go 1.25 and provide the admin credentials plus the required room token CSV:
 ```sh
 export ADMIN_PASSWORD='replace-with-a-strong-password'
 export SESSION_SECRET='replace-with-at-least-32-random-bytes'
-go run . -token-file room.csv
+go run . -account account.csv
 ```
 
 Open `http://localhost:8080` directly for development, or the configured HTTPS deployment URL in production. The secure session cookie requires HTTPS in production.
@@ -33,7 +33,7 @@ docker build -t image.prod.tw/rozeta-dashboard:latest .
 docker run --rm -p 8080:8080 \
   -e ADMIN_PASSWORD \
   -e SESSION_SECRET \
-  --mount type=bind,src="$(pwd)/room.csv",dst=/data/room.csv,readonly \
+  --mount type=bind,src="$(pwd)/account.csv",dst=/data/account.csv,readonly \
   image.prod.tw/rozeta-dashboard:latest
 ```
 
@@ -48,7 +48,7 @@ export SESSION_SECRET='replace-with-at-least-32-random-bytes'
 docker compose up -d
 ```
 
-`compose.yaml` mounts `./room.csv` read-only and exposes port `8080`. Override these defaults with `ROOM_TOKEN_FILE`, `HTTP_PORT`, or `IMAGE` as needed. Use `docker compose logs -f dashboard` to inspect startup and `docker compose down` to stop the service.
+`compose.yaml` mounts `./account.csv` read-only and exposes port `8080`. Override these defaults with `ACCOUNT_FILE`, `HTTP_PORT`, or `IMAGE` as needed. Use `docker compose logs -f dashboard` to inspect startup and `docker compose down` to stop the service.
 
 ## License
 

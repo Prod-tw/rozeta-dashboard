@@ -2,7 +2,7 @@
 
 ## Overview
 
-- `go run . -token-file room.csv` starts the only process: Gin HTTP, admin WebSocket, embedded UI, and Rozeta synchronization.
+- `go run . -account account.csv` starts the only process: Gin HTTP, admin WebSocket, embedded UI, and Rozeta synchronization.
 - `main.go` wires routes and command execution, `rozeta.go` owns Rozeta HTTP calls, `state.go` owns room state, `auth.go` owns admin sessions, and `ws.go` owns admin WebSocket clients.
 - There is no room userscript or agent WebSocket. Room state comes from Rozeta meeting APIs.
 
@@ -11,7 +11,7 @@
 ```sh
 export ADMIN_PASSWORD='replace-with-a-strong-password'
 export SESSION_SECRET='replace-with-at-least-32-random-bytes'
-go run . -token-file room.csv
+go run . -account account.csv
 ```
 
 The token CSV is required. Missing files, malformed rows, empty fields, and duplicate room names stop startup. One token that Rozeta later rejects marks only that room as `authentication_error`.
