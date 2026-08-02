@@ -4,17 +4,19 @@ Authenticated control panel for managing multiple Rozeta room accounts through t
 
 ## How to Run
 
-Use Go 1.25 and provide the admin credentials plus the required room token CSV:
+Use Go 1.25 and provide the admin credentials plus the required room token CSV. Pass the optional session CSV to order each room's meetings by the COSCUP timetable:
 
 ```sh
 export ADMIN_PASSWORD='replace-with-a-strong-password'
 export SESSION_SECRET='replace-with-at-least-32-random-bytes'
-go run . -account account.csv
+go run . -account account.csv -session session.csv
 ```
 
 Open `http://localhost:8080` directly for development, or the configured HTTPS deployment URL in production. The secure session cookie requires HTTPS in production.
 
 The CSV must start with either `account,User ID,Token` or `帳號,User ID,Token`. Room names are derived by removing `@coscup.org` from the account field.
+
+When `-session` is present, the file must contain `議程 ID` and `Session ID` columns. At startup the service downloads `https://coscup.org/2026/api/opass.json`, joins the Rozeta meeting ID to the opass session ID, and sorts meetings from earliest to latest. Missing mappings appear last as `未排程`; malformed mapping rows are logged. Without `-session`, meetings are sorted by title and no timetable is shown.
 
 Use Goto before Start or Pause when no unique active meeting can be resolved. Start and Pause wait up to 15 seconds for Rozeta to report the expected meeting status. Resume permanently deletes the selected completed meeting's transcriptions and translations before resetting it to ready.
 
@@ -26,7 +28,7 @@ go test ./...
 
 ## Container
 
-Build and run the container with the token CSV mounted read-only. Credentials remain runtime environment variables and are not stored in the image:
+Build and run the container with both CSV files mounted read-only. Credentials remain runtime environment variables and are not stored in the image:
 
 ```sh
 docker build -t image.prod.tw/rozeta-dashboard:latest .
@@ -34,7 +36,9 @@ docker run --rm -p 8080:8080 \
   -e ADMIN_PASSWORD \
   -e SESSION_SECRET \
   --mount type=bind,src="$(pwd)/account.csv",dst=/data/account.csv,readonly \
-  image.prod.tw/rozeta-dashboard:latest
+  --mount type=bind,src="$(pwd)/session.csv",dst=/data/session.csv,readonly \
+  image.prod.tw/rozeta-dashboard:latest \
+  -account /data/account.csv -session /data/session.csv
 ```
 
 `.github/workflows/container.yml` tests every pull request and builds the image without publishing it. Pushes to `main`, version tags matching `v*`, and manual workflow runs publish `image.prod.tw/rozeta-dashboard` for `linux/amd64` and `linux/arm64`. Configure the registry password as the GitHub Actions repository secret `REGISTRY_PASSWORD`; the workflow injects it only into `docker/login-action` and logs in as `prod`.
@@ -48,7 +52,7 @@ export SESSION_SECRET='replace-with-at-least-32-random-bytes'
 docker compose up -d
 ```
 
-`compose.yaml` mounts `./account.csv` read-only and exposes port `8080`. Override these defaults with `ACCOUNT_FILE`, `HTTP_PORT`, or `IMAGE` as needed. Use `docker compose logs -f dashboard` to inspect startup and `docker compose down` to stop the service.
+`compose.yaml` mounts `./account.csv` and `./session.csv` read-only and exposes port `8080`. Override these defaults with `ACCOUNT_FILE`, `SESSION_FILE`, `HTTP_PORT`, or `IMAGE` as needed. Use `docker compose logs -f dashboard` to inspect startup and `docker compose down` to stop the service.
 
 ## License
 

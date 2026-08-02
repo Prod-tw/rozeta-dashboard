@@ -19,6 +19,13 @@ services:
         source: ${ACCOUNT_FILE:-./account.csv}
         target: /data/account.csv
         read_only: true
+      - type: bind
+        # Meeting lists previously inherited Rozeta's API order. Mount the event
+        # mapping at runtime so Compose enables timetable ordering by default.
+        source: ${SESSION_FILE:-./session.csv}
+        target: /data/session.csv
+        read_only: true
+    command: ['-account', '/data/account.csv', '-session', '/data/session.csv']
     # The application does not write locally or need Linux capabilities. These limits
     # replace Docker's broader defaults without changing network access to Rozeta.
     read_only: true

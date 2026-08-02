@@ -1,0 +1,284 @@
+package main
+
+import (
+	"context"
+	"encoding/csv"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"sort"
+	"strings"
+	"time"
+)
+
+const opassScheduleURL = "https://coscup.org/2026/api/opass.json"
+
+type meetingSchedule struct {
+	enabled bool
+	starts  map[string]time.Time
+}
+
+type scheduleWarning struct {
+	Line      int
+	MeetingID string
+	SessionID string
+	Reason    string
+}
+
+type sessionMapping struct {
+	line      int
+	meetingID string
+	sessionID string
+}
+
+type opassSchedule struct {
+	Sessions []struct {
+		ID    string `json:"id"`
+		Start string `json:"start"`
+	} `json:"sessions"`
+}
+
+type scheduleLoadOptions struct {
+	url         string
+	client      *http.Client
+	retryDelays []time.Duration
+}
+
+func loadMeetingSchedule(ctx context.Context, path string) (meetingSchedule, []scheduleWarning, error) {
+	return loadMeetingScheduleWithOptions(ctx, path, scheduleLoadOptions{
+		url:         opassScheduleURL,
+		client:      &http.Client{Timeout: 10 * time.Second},
+		retryDelays: []time.Duration{time.Second, 2 * time.Second},
+	})
+}
+
+func loadMeetingScheduleWithOptions(
+	ctx context.Context,
+	path string,
+	options scheduleLoadOptions,
+) (meetingSchedule, []scheduleWarning, error) {
+	mappings, warnings, err := loadSessionMappings(path)
+	if err != nil {
+		return meetingSchedule{}, nil, err
+	}
+
+	opass, err := fetchOPASSSchedule(ctx, options)
+	if err != nil {
+		return meetingSchedule{}, nil, err
+	}
+	sessionStarts, err := indexOPASSSessions(opass)
+	if err != nil {
+		return meetingSchedule{}, nil, err
+	}
+
+	starts := make(map[string]time.Time, len(mappings))
+	for _, mapping := range mappings {
+		startValue, found := sessionStarts[mapping.sessionID]
+		if !found {
+			warnings = append(warnings, scheduleWarning{
+				Line:      mapping.line,
+				MeetingID: mapping.meetingID,
+				SessionID: mapping.sessionID,
+				Reason:    "session ID was not found in opass",
+			})
+			continue
+		}
+		start, err := time.Parse(time.RFC3339, startValue)
+		if err != nil {
+			warnings = append(warnings, scheduleWarning{
+				Line:      mapping.line,
+				MeetingID: mapping.meetingID,
+				SessionID: mapping.sessionID,
+				Reason:    fmt.Sprintf("invalid opass start time %q", startValue),
+			})
+			continue
+		}
+		starts[mapping.meetingID] = start
+	}
+
+	return meetingSchedule{enabled: true, starts: starts}, warnings, nil
+}
+
+func loadSessionMappings(path string) ([]sessionMapping, []scheduleWarning, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+
+	records, err := csv.NewReader(file).ReadAll()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil, errors.New("session CSV has no header")
+	}
+
+	meetingColumn := headerColumn(records[0], "議程 ID")
+	sessionColumn := headerColumn(records[0], "Session ID")
+	if meetingColumn < 0 || sessionColumn < 0 {
+		return nil, nil, errors.New("session CSV must contain 議程 ID and Session ID headers")
+	}
+
+	mappings := make([]sessionMapping, 0, len(records)-1)
+	warnings := make([]scheduleWarning, 0)
+	meetingLines := make(map[string]int)
+	sessionLines := make(map[string]int)
+	for index, record := range records[1:] {
+		line := index + 2
+		meetingID := strings.TrimSpace(record[meetingColumn])
+		sessionID := strings.TrimSpace(record[sessionColumn])
+		if previousLine, duplicate := meetingLines[meetingID]; meetingID != "" && duplicate {
+			return nil, nil, fmt.Errorf(
+				"session CSV line %d duplicates meeting ID %q from line %d",
+				line,
+				meetingID,
+				previousLine,
+			)
+		}
+		if previousLine, duplicate := sessionLines[sessionID]; sessionID != "" && duplicate {
+			return nil, nil, fmt.Errorf(
+				"session CSV line %d duplicates session ID %q from line %d",
+				line,
+				sessionID,
+				previousLine,
+			)
+		}
+		// Empty rows previously skipped duplicate tracking for their non-empty ID. Track
+		// each usable ID first so malformed rows cannot hide an ambiguous mapping.
+		if meetingID != "" {
+			meetingLines[meetingID] = line
+		}
+		if sessionID != "" {
+			sessionLines[sessionID] = line
+		}
+		if meetingID == "" || sessionID == "" {
+			warnings = append(warnings, scheduleWarning{
+				Line:      line,
+				MeetingID: meetingID,
+				SessionID: sessionID,
+				Reason:    "empty meeting ID or session ID",
+			})
+			continue
+		}
+		mappings = append(mappings, sessionMapping{line: line, meetingID: meetingID, sessionID: sessionID})
+	}
+	if len(mappings) == 0 {
+		warnings = append(warnings, scheduleWarning{Reason: "session CSV contains no valid mappings"})
+	}
+	return mappings, warnings, nil
+}
+
+func headerColumn(header []string, name string) int {
+	for index, value := range header {
+		if strings.TrimSpace(value) == name {
+			return index
+		}
+	}
+	return -1
+}
+
+func fetchOPASSSchedule(ctx context.Context, options scheduleLoadOptions) (opassSchedule, error) {
+	client := options.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	requestURL := strings.TrimSpace(options.url)
+	if requestURL == "" {
+		requestURL = opassScheduleURL
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= len(options.retryDelays); attempt++ {
+		if attempt > 0 {
+			delay := options.retryDelays[attempt-1]
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return opassSchedule{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		opass, err := fetchOPASSScheduleOnce(ctx, client, requestURL)
+		if err == nil {
+			return opass, nil
+		}
+		lastErr = err
+	}
+	return opassSchedule{}, fmt.Errorf("load opass schedule after %d attempts: %w", len(options.retryDelays)+1, lastErr)
+}
+
+func fetchOPASSScheduleOnce(ctx context.Context, client *http.Client, requestURL string) (opassSchedule, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return opassSchedule{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return opassSchedule{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return opassSchedule{}, fmt.Errorf("opass API returned %s", resp.Status)
+	}
+
+	var opass opassSchedule
+	if err := json.NewDecoder(resp.Body).Decode(&opass); err != nil {
+		return opassSchedule{}, fmt.Errorf("decode opass schedule: %w", err)
+	}
+	return opass, nil
+}
+
+func indexOPASSSessions(opass opassSchedule) (map[string]string, error) {
+	starts := make(map[string]string, len(opass.Sessions))
+	for _, session := range opass.Sessions {
+		id := strings.TrimSpace(session.ID)
+		if _, duplicate := starts[id]; duplicate {
+			return nil, fmt.Errorf("opass duplicates session ID %q", id)
+		}
+		starts[id] = strings.TrimSpace(session.Start)
+	}
+	return starts, nil
+}
+
+func (schedule meetingSchedule) prepareMeetings(meetings []roomMeetingView) []roomMeetingView {
+	prepared := append([]roomMeetingView{}, meetings...)
+	if !schedule.enabled {
+		// The admin list previously inherited Rozeta pagination order. Without a session
+		// schedule, title and ID now provide a deterministic fallback order.
+		sort.Slice(prepared, func(left, right int) bool {
+			return meetingTitleBefore(prepared[left], prepared[right])
+		})
+		return prepared
+	}
+
+	for index := range prepared {
+		if start, found := schedule.starts[prepared[index].ID]; found {
+			prepared[index].ScheduledStart = &start
+		}
+	}
+	// Scheduled meetings previously appeared in Rozeta's API order. Stable sorting now
+	// follows the event timetable while preserving API order among unknown meetings.
+	sort.SliceStable(prepared, func(left, right int) bool {
+		leftStart := prepared[left].ScheduledStart
+		rightStart := prepared[right].ScheduledStart
+		if leftStart == nil || rightStart == nil {
+			return leftStart != nil
+		}
+		if !leftStart.Equal(*rightStart) {
+			return leftStart.Before(*rightStart)
+		}
+		return meetingTitleBefore(prepared[left], prepared[right])
+	})
+	return prepared
+}
+
+func meetingTitleBefore(left, right roomMeetingView) bool {
+	if left.Title != right.Title {
+		return left.Title < right.Title
+	}
+	return left.ID < right.ID
+}

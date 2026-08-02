@@ -1,6 +1,7 @@
 const state = {
 	rooms: new Map(),
 	roomMeetings: new Map(),
+	scheduleEnabled: false,
 	selectedRoom: '',
 	meetingsLoadingFor: '',
 	// Room visibility used to follow the shared server snapshot. Keeping hidden room names separately makes the
@@ -193,6 +194,7 @@ async function loadRoomMeetings(roomName) {
 		if (!response.ok) {
 			throw new Error(body?.error || 'meeting lookup failed')
 		}
+		state.scheduleEnabled = body.schedule_enabled === true
 		state.roomMeetings.set(normalizedRoom, body.meetings || [])
 	} catch (error) {
 		pushAlert('error', localizeError(error instanceof Error ? error.message : String(error)), {
@@ -381,12 +383,22 @@ function renderMeetingList() {
 	roomMeetings.innerHTML = meetings
 		.map(meeting => {
 			const selected = meeting.id === targetID ? 'selected' : ''
+			// Meeting rows previously had no timetable context. When the backend loaded a
+			// schedule, show Taiwan event time and make unmatched rows explicit.
+			const scheduleLabel = state.scheduleEnabled
+				? meeting.scheduled_start
+					? formatScheduledStart(meeting.scheduled_start)
+					: '未排程'
+				: ''
 			const meta = [
+				scheduleLabel,
 				meeting.id,
 				labelFor(meetingStatusLabels, meeting.status),
 				meeting.source_language || '—',
 				meeting.target_language || '—',
-			].join(' · ')
+			]
+				.filter(Boolean)
+				.join(' · ')
 			return `
 				<button type="button" class="meeting-item ${selected}" data-meeting-id="${escapeAttr(meeting.id)}" data-tooltip="選擇這場會議，供「切換會議」或「重設會議」使用。">
 					<span class="meeting-title">${escapeHtml(meeting.title || meeting.id)}</span>
@@ -402,6 +414,20 @@ function renderMeetingList() {
 			renderActions()
 		})
 	})
+}
+
+function formatScheduledStart(value) {
+	const parts = new Intl.DateTimeFormat('zh-TW', {
+		timeZone: 'Asia/Taipei',
+		month: '2-digit',
+		day: '2-digit',
+		hour: '2-digit',
+		minute: '2-digit',
+		hourCycle: 'h23',
+	})
+		.formatToParts(new Date(value))
+		.reduce((result, part) => ({ ...result, [part.type]: part.value }), {})
+	return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`
 }
 
 function renderActions() {

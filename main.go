@@ -38,6 +38,7 @@ type app struct {
 	ctx              context.Context
 	state            *state
 	tokenStore       map[string]string
+	meetingSchedule  meetingSchedule
 	rozetaBaseURL    string
 	httpClient       *http.Client
 	adminPassword    string
@@ -52,6 +53,7 @@ func main() {
 	// The generic account filename replaces the previous room-token-specific CLI name
 	// so operators now provide the required credentials with -account.
 	accountFile := flag.String("account", "", "path to required account CSV file")
+	sessionFile := flag.String("session", "", "path to optional session CSV file")
 	flag.Parse()
 
 	if strings.TrimSpace(*accountFile) == "" {
@@ -72,9 +74,30 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	schedule := meetingSchedule{starts: make(map[string]time.Time)}
+	if strings.TrimSpace(*sessionFile) != "" {
+		var warnings []scheduleWarning
+		schedule, warnings, err = loadMeetingSchedule(ctx, *sessionFile)
+		if err != nil {
+			log.Fatalf("load session schedule: %v", err)
+		}
+		for _, warning := range warnings {
+			log.Printf(
+				"session schedule warning: line=%d meeting_id=%q session_id=%q reason=%s",
+				warning.Line,
+				warning.MeetingID,
+				warning.SessionID,
+				warning.Reason,
+			)
+		}
+		if len(warnings) > 0 {
+			log.Printf("session schedule loaded with %d warning(s)", len(warnings))
+		}
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	a := newApp(ctx, tokens, adminPassword, sessionSecret)
+	a.meetingSchedule = schedule
 	router, err := a.router()
 	if err != nil {
 		log.Fatalf("configure router: %v", err)
@@ -117,6 +140,7 @@ func newApp(ctx context.Context, tokens map[string]string, adminPassword string,
 		ctx:              ctx,
 		state:            newState(),
 		tokenStore:       tokens,
+		meetingSchedule:  meetingSchedule{starts: make(map[string]time.Time)},
 		rozetaBaseURL:    "https://rozeta.app",
 		httpClient:       &http.Client{Timeout: 15 * time.Second},
 		adminPassword:    adminPassword,
@@ -206,19 +230,21 @@ func (a *app) handleListRooms(c *gin.Context) {
 }
 
 type roomMeetingView struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	Source    string    `json:"source_language,omitempty"`
-	Target    string    `json:"target_language,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	PausedAt  time.Time `json:"paused_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	ID             string     `json:"id"`
+	Title          string     `json:"title"`
+	Status         string     `json:"status"`
+	Source         string     `json:"source_language,omitempty"`
+	Target         string     `json:"target_language,omitempty"`
+	StartedAt      time.Time  `json:"started_at,omitempty"`
+	PausedAt       time.Time  `json:"paused_at,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at,omitempty"`
+	ScheduledStart *time.Time `json:"scheduled_start,omitempty"`
 }
 
 type roomMeetingsResponse struct {
-	RoomName string            `json:"room_name"`
-	Meetings []roomMeetingView `json:"meetings"`
+	RoomName        string            `json:"room_name"`
+	ScheduleEnabled bool              `json:"schedule_enabled"`
+	Meetings        []roomMeetingView `json:"meetings"`
 }
 
 func (a *app) handleRoomMeetings(c *gin.Context) {
@@ -240,7 +266,11 @@ func (a *app) handleRoomMeetings(c *gin.Context) {
 		a.broadcastRoom(room)
 	}
 	a.broadcastLateConfirmation(before, room)
-	c.JSON(http.StatusOK, roomMeetingsResponse{RoomName: roomName, Meetings: meetings})
+	c.JSON(http.StatusOK, roomMeetingsResponse{
+		RoomName:        roomName,
+		ScheduleEnabled: a.meetingSchedule.enabled,
+		Meetings:        a.meetingSchedule.prepareMeetings(meetings),
+	})
 }
 
 type commandRequest struct {

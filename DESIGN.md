@@ -7,11 +7,20 @@ The service manages Rozeta room accounts without browser automation. A single Go
 ## Control Flow
 
 1. The server strictly loads rooms and tokens from the required CSV.
-2. Each room starts in `syncing` while the server loads its Rozeta meetings.
-3. The server refreshes all rooms every 10 seconds with at most six concurrent requests and a two-second deadline per room.
-4. The admin submits Goto, Start, Pause, or Resume for one room.
-5. The server permits only one pending command per room and returns a command ID.
-6. Admin WebSocket snapshots preserve loading state across page reloads and reconnects.
+2. When `-session` is provided, the server joins its Rozeta meeting IDs to one startup snapshot of the COSCUP opass schedule.
+3. Each room starts in `syncing` while the server loads its Rozeta meetings.
+4. The server refreshes all rooms every 10 seconds with at most six concurrent requests and a two-second deadline per room.
+5. The admin submits Goto, Start, Pause, or Resume for one room.
+6. The server permits only one pending command per room and returns a command ID.
+7. Admin WebSocket snapshots preserve loading state across page reloads and reconnects.
+
+## Meeting Schedule
+
+The optional session CSV maps `議程 ID` (Rozeta meeting ID) to `Session ID` (opass session ID). The server downloads `https://coscup.org/2026/api/opass.json` once at startup and retries every fetch, HTTP, or JSON failure up to three total attempts with ten-second request timeouts and one- then two-second delays.
+
+The room meetings API is the only sorting authority. Known meetings sort by RFC 3339 start time, then Unicode title and meeting ID. Unknown meetings follow all known meetings while retaining their relative Rozeta order. Without `-session`, all meetings sort by Unicode title and meeting ID. The API includes `schedule_enabled` and optional `scheduled_start`; the admin formats known starts in `Asia/Taipei` as `MM/DD HH:mm` and labels unmatched meetings `未排程`.
+
+Duplicate meeting IDs or session IDs in the CSV and duplicate opass session IDs stop startup because they make the join ambiguous. Empty CSV IDs, missing opass sessions, and invalid start times are logged individually and summarized, then degrade those meetings to unscheduled. Titles and rooms are deliberately not compared because IDs are authoritative and schedule edits can leave descriptive CSV fields stale.
 
 ## Current Meeting
 
@@ -49,4 +58,6 @@ Failed login attempts are limited in memory to ten per direct client IP in five 
 - Start and Pause use outcome-based confirmation because meeting status is more useful than command transport status.
 - Per-room exclusion prevents overlapping commands while allowing different rooms to operate concurrently.
 - Strict CSV parsing fails early instead of silently omitting a room or choosing between duplicate credentials.
+- Schedule sorting is limited to API responses so it cannot change current-meeting inference or command behavior.
+- The opass schedule is immutable for one process lifetime; operators restart the service to pick up event schedule changes.
 - No database is added because runtime command history is operational rather than durable data.

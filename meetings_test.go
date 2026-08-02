@@ -41,6 +41,13 @@ func TestHandleRoomMeetingsFlattensPagination(t *testing.T) {
 	a := newApp(context.Background(), map[string]string{"TR409-2": "token-a"}, "password", []byte("01234567890123456789012345678901"))
 	a.rozetaBaseURL = baseURL
 	a.httpClient = server.Client()
+	a.meetingSchedule = meetingSchedule{
+		enabled: true,
+		starts: map[string]time.Time{
+			"m1": time.Date(2026, time.August, 9, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)),
+			"m2": time.Date(2026, time.August, 8, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)),
+		},
+	}
 
 	router := gin.New()
 	router.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
@@ -63,8 +70,14 @@ func TestHandleRoomMeetingsFlattensPagination(t *testing.T) {
 	if got := len(body.Meetings); got != 2 {
 		t.Fatalf("meetings = %d, want 2", got)
 	}
-	if body.Meetings[0].ID != "m1" || body.Meetings[1].ID != "m2" {
+	if !body.ScheduleEnabled {
+		t.Fatal("schedule_enabled = false, want true")
+	}
+	if body.Meetings[0].ID != "m2" || body.Meetings[1].ID != "m1" {
 		t.Fatalf("unexpected meetings: %#v", body.Meetings)
+	}
+	if body.Meetings[0].ScheduledStart == nil {
+		t.Fatal("scheduled_start is nil, want opass start")
 	}
 }
 
