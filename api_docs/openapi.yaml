@@ -22,12 +22,11 @@ tags:
   - name: Conversations
   - name: Context Presets
   - name: Orders
-  - name: Payments
   - name: Plans
   - name: Credits
   - name: General
+  - name: Health
   - name: Broadcasting
-  - name: Waitlist
   - name: Commands
 paths:
   /api/v1/auth/login-link:
@@ -190,8 +189,9 @@ paths:
         - `conversation.{conversation_id}` for `conversation.started` and `conversation.paused`
         - `conversation.transcription.{conversation_id}` for `transcription.created`
         - `conversation.translation.{conversation_id}` for `translation.created`
-        - `command.{user_id}` for cross-device command events, where `user_id`
+        - `command.{user_id}` for commands without a target client, where `user_id`
         is the authenticated user's sqid
+        - `command.{user_id}.{client_id}` for commands targeted to a specific client
 
         Conversation channel ids are conversation ids returned by
         `POST /api/v1/conversations`, not user ids.
@@ -237,17 +237,20 @@ paths:
         conversation, then broadcasts a command event to the user's private
         Socket.IO command channel.
 
-        Subscribe to `command.{user_id}`, where `user_id` is the authenticated
-        user's sqid. Event names:
+        Subscribe to `command.{user_id}` for commands sent without `client_id`, or
+        `command.{user_id}.{client_id}` for commands targeted to a specific client,
+        where `user_id` is the authenticated user's sqid. Event names:
         - `command.goto_meeting`
+        - `command.goto_meeting_embed`
         - `command.start_meeting`
         - `command.pause_meeting`
         - `command.goto_conversation`
         - `command.start_conversation`
         - `command.pause_conversation`
 
-        Meeting command payloads include `{ "meeting_id": "<meeting_sqid>" }`.
-        Conversation command payloads include `{ "conversation_id": "<conversation_uuid>" }`.
+        Meeting command payloads include `{ "meeting_id": "<meeting_sqid>", "payload": {} }`.
+        Conversation command payloads include `{ "conversation_id": "<conversation_uuid>", "payload": {} }`.
+        The nested `payload` contains the command-specific data from the request, or `null` when omitted.
       parameters: []
       responses:
         '200':
@@ -706,6 +709,51 @@ paths:
                 $ref: '#/components/schemas/ExceptionResponse'
       tags:
         - Conversations
+  /api/v1/conversations/{conversationId}/online-count:
+    get:
+      operationId: ConversationAPIOperations_getConversationOnlineCount
+      summary: Get conversation online count
+      description: |-
+        Get conversation online count
+
+        Retrieves the current number of clients connected to the conversation private room.
+        Only the conversation owner can access this endpoint.
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: Conversation ID (UUID)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current online count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnlineCountResponse'
+        '400':
+          description: Current online count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+        '403':
+          description: Current online count
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/AccessDeniedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Conversations
   /api/v1/conversations/{conversationId}/ping:
     post:
       operationId: ConversationAPIOperations_pingConversation
@@ -972,6 +1020,33 @@ paths:
                 $ref: '#/components/schemas/ExceptionResponse'
       tags:
         - General
+  /api/v1/health:
+    get:
+      operationId: HealthOperations_getHealth
+      summary: Get service health status
+      description: |-
+        Get service health status
+
+        Checks the database, Redis, and Echo service concurrently. Each check
+        times out after three seconds. The request returns the connection status
+        of each dependency; `success` is true only when every dependency is
+        reachable. This endpoint does not require authentication.
+      parameters: []
+      responses:
+        '200':
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Health
   /api/v1/meetings:
     get:
       operationId: MeetingOperations_getMeetings
@@ -1299,6 +1374,45 @@ paths:
                 $ref: '#/components/schemas/ExceptionResponse'
       tags:
         - Meetings
+  /api/v1/meetings/{meetingId}/online-count:
+    get:
+      operationId: MeetingOperations_getMeetingOnlineCount
+      summary: Get meeting online count
+      description: |-
+        Get meeting online count
+
+        Retrieves the current number of clients connected to the meeting private room.
+        Only the meeting owner can access this endpoint.
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current online count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnlineCountResponse'
+        '403':
+          description: Current online count
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
   /api/v1/meetings/{meetingId}/qrcode:
     get:
       operationId: MeetingOperations_getMeetingQrCode
@@ -1344,9 +1458,9 @@ paths:
       operationId: MeetingOperations_resumeMeeting
       summary: Resume completed meeting
       description: |-
-        Resume a completed meeting
+        Resume a meeting
 
-        Resumes a completed meeting by resetting it to ready status and clearing all
+        Resumes a meeting by resetting it to ready status and clearing all
         transcription and translation data. This allows the meeting to be used again
         for a new session.
 
@@ -1359,9 +1473,8 @@ paths:
         - Meeting configuration (title, languages, context) is preserved
 
         Requirements:
-        - Meeting must be in 'completed' status
+        - Meeting must not be in 'ready' status
         - Only the meeting owner can resume
-        - Cannot resume meetings in other states (ready, in_progress, paused)
       parameters:
         - name: meetingId
           in: path
@@ -1510,7 +1623,10 @@ paths:
 
         Requirements:
         - Meeting must be in 'completed' status
+        - Meeting duration must be greater than 180 seconds
         - Meeting must have transcriptions available
+        - Meeting must have no more than 30 stored transcription entries
+        - Combined transcription text must be at least 300 characters
         - Summary must not have been generated previously
         - Only the meeting owner can generate summaries
 
@@ -1522,7 +1638,9 @@ paths:
         Error scenarios:
         - Meeting not completed: Returns 400 with 'meeting_not_completed_for_summary'
         - Summary already generated: Returns 400 with 'summary_already_generated'
-        - No transcriptions found: Returns 400 with 'summary_generation_failed'
+        - Meeting duration is 180 seconds or less: Returns 400 with 'duration_too_short_for_summary'
+        - Transcription eligibility or minimum length check fails: Returns 400 with 'transcription_too_short_for_summary'
+        - No transcriptions found: Returns 400 with 'no_transcriptions_to_fetch'
         - Generation in progress: Returns 400 with 'summary_generation_in_progress'
       parameters:
         - name: meetingId
@@ -1552,6 +1670,70 @@ paths:
                 anyOf:
                   - $ref: '#/components/schemas/UnauthenticatedResponse'
                   - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/summary/export:
+    get:
+      operationId: MeetingOperations_exportSummary
+      summary: Export meeting summary
+      description: |-
+        Export meeting summary
+
+        Downloads the existing generated meeting summary as a Markdown attachment.
+        This endpoint does not generate a summary; use the summarize endpoint first.
+
+        Requirements:
+        - Meeting must be in 'completed' status
+        - Summary must already exist
+        - Only the meeting owner can export the summary
+
+        File naming:
+        - Filename contains the meeting finish time and snake-cased title
+        - Format: `{snake_cased_title}_summary_{Ymd_His}.md`
+
+        Error scenarios:
+        - Meeting not completed: Returns 400
+        - Summary not ready: Returns 404
+        - Not meeting owner: Returns 403
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Markdown file attachment
+          headers:
+            Content-Disposition:
+              required: true
+              schema:
+                type: string
+          content:
+            text/markdown:
+              schema:
+                type: string
+        '403':
+          description: Markdown file attachment
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Markdown file attachment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         default:
           description: An unexpected error response.
           content:
@@ -1628,6 +1810,63 @@ paths:
                 $ref: '#/components/schemas/ExceptionResponse'
       tags:
         - Meetings
+  /api/v1/meetings/{meetingId}/transcriptions/export:
+    get:
+      operationId: MeetingOperations_exportTranscriptions
+      summary: Export meeting transcriptions
+      description: |-
+        Export meeting transcriptions
+
+        Streams the completed meeting's transcription text as a Markdown attachment.
+
+        Requirements:
+        - Meeting must be in 'completed' status
+        - Only the meeting owner can export the transcription
+
+        File naming:
+        - Filename contains the meeting finish time and snake-cased title
+        - Format: `{snake_cased_title}_transcription_{Ymd_His}.md`
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Markdown file attachment
+          headers:
+            Content-Disposition:
+              required: true
+              schema:
+                type: string
+          content:
+            text/markdown:
+              schema:
+                type: string
+        '400':
+          description: Markdown file attachment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Markdown file attachment
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
   /api/v1/meetings/{meetingId}/translations:
     get:
       operationId: MeetingOperations_getMeetingTranslations
@@ -1688,6 +1927,63 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UnauthenticatedResponse'
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Meetings
+  /api/v1/meetings/{meetingId}/translations/export:
+    get:
+      operationId: MeetingOperations_exportTranslations
+      summary: Export meeting translations
+      description: |-
+        Export meeting translations
+
+        Streams the completed meeting's translation text as a Markdown attachment.
+
+        Requirements:
+        - Meeting must be in 'completed' status
+        - Only the meeting owner can export the translation
+
+        File naming:
+        - Filename contains the meeting finish time and snake-cased title
+        - Format: `{snake_cased_title}_translation_{Ymd_His}.md`
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Markdown file attachment
+          headers:
+            Content-Disposition:
+              required: true
+              schema:
+                type: string
+          content:
+            text/markdown:
+              schema:
+                type: string
+        '400':
+          description: Markdown file attachment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Markdown file attachment
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/UnauthenticatedResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
         default:
           description: An unexpected error response.
           content:
@@ -1802,7 +2098,7 @@ paths:
 
         Payment completion:
         - User completes payment on gateway's checkout page
-        - Gateway sends webhook to /payments/stripe/callback
+        - Gateway confirms the payment
         - System processes payment and activates subscription plan
         - Plan's included minutes are added to user account
 
@@ -1914,7 +2210,7 @@ paths:
 
         Payment completion:
         - User completes payment on gateway's checkout page
-        - Gateway sends webhook to /payments/stripe/callback
+        - Gateway confirms the payment
         - System processes payment and adds credit duration to user account
         - Credits are immediately available for use
 
@@ -2113,53 +2409,6 @@ paths:
                 $ref: '#/components/schemas/ExceptionResponse'
       tags:
         - Orders
-  /api/v1/payments/stripe/callback:
-    post:
-      operationId: PaymentOperations_stripeCallback
-      summary: Stripe payment webhook
-      description: |-
-        Stripe payment callback webhook
-
-        Webhook endpoint for Stripe to notify successful payments.
-        This endpoint should be registered in Stripe dashboard.
-
-        Process flow:
-        1. Receives session_id from Stripe
-        2. Retrieves payment details from Stripe API
-        3. Validates payment status
-        4. Updates order status to 'completed'
-        5. Activates plan subscription (if applicable)
-        6. Adds credit duration to user account
-        7. Emits PaymentSucceeded and OrderCompleted events
-      parameters: []
-      responses:
-        '200':
-          description: Success status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SuccessResponse'
-        '422':
-          description: Success status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        default:
-          description: An unexpected error response.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExceptionResponse'
-      tags:
-        - Payments
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/Models.StripeCallbackRequest'
-        description: Stripe callback with session ID
   /api/v1/plans:
     get:
       operationId: PlanOperations_getPlans
@@ -2265,44 +2514,6 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/UpdateUserConfigRequest'
-  /api/v1/waitlist:
-    post:
-      operationId: WaitlistOperations_joinWaitlist
-      summary: Join the waitlist
-      description: |-
-        Join the waitlist
-
-        Submits a request to join the product waitlist. Collects user information
-        including name, email, optional company, and use case. The user's IP address
-        is automatically captured for analytics purposes.
-      parameters: []
-      responses:
-        '200':
-          description: Success response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SuccessResponse'
-        '422':
-          description: Success response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        default:
-          description: An unexpected error response.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExceptionResponse'
-      tags:
-        - Waitlist
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/JoinWaitlistRequest'
   /api/web/auth/callback:
     get:
       operationId: WebAuthOperations_handleCallback
@@ -2440,6 +2651,139 @@ paths:
                 $ref: '#/components/schemas/ExceptionResponse'
       tags:
         - Web Authentication
+  /api/web/meetings/{meetingId}/embed:
+    get:
+      operationId: EmbedMeetingAuthOperations_loginEmbedMeeting
+      summary: Authenticate meeting embed
+      description: |-
+        Authenticate and open a meeting embed
+
+        Accepts a JWT for the meeting owner, sets it as the HTTP-only auth_token
+        cookie, and redirects to `/meetings/{meetingId}/embed` on the frontend.
+        The token is removed from the redirect URL. All other query parameters are
+        forwarded to the embed page.
+
+        Color values are three- or six-digit RGB hex strings without a leading `#`.
+        Font size and padding values are expressed in rem units.
+      parameters:
+        - name: meetingId
+          in: path
+          required: true
+          description: Meeting ID (sqid)
+          schema:
+            type: string
+        - name: token
+          in: query
+          required: true
+          description: JWT authentication token for the meeting owner
+          schema:
+            type: string
+          explode: false
+        - name: theme
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - system
+              - light
+              - dark
+          explode: false
+        - name: fontSize
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+          explode: false
+        - name: paddingX
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+          explode: false
+        - name: paddingY
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+          explode: false
+        - name: layout
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - inline
+              - split-horizontal
+              - split-vertical
+              - transcription
+              - translation
+          explode: false
+        - name: multiline
+          in: query
+          required: false
+          schema:
+            type: boolean
+          explode: false
+        - name: header
+          in: query
+          required: false
+          schema:
+            type: boolean
+          explode: false
+        - name: footer
+          in: query
+          required: false
+          schema:
+            type: boolean
+          explode: false
+        - name: backgroundColor
+          in: query
+          required: false
+          schema:
+            type: string
+          explode: false
+        - name: transcriptionColor
+          in: query
+          required: false
+          schema:
+            type: string
+          explode: false
+        - name: translationColor
+          in: query
+          required: false
+          schema:
+            type: string
+          explode: false
+      responses:
+        '302':
+          description: Redirect to the frontend embed page with the auth cookie set
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: true
+              schema:
+                type: string
+        '401':
+          description: Redirect to the frontend embed page with the auth cookie set
+        '403':
+          description: Redirect to the frontend embed page with the auth cookie set
+        '404':
+          description: Redirect to the frontend embed page with the auth cookie set
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExceptionResponse'
+      tags:
+        - Web Authentication
 components:
   schemas:
     AccessDeniedResponse:
@@ -2499,6 +2843,17 @@ components:
         target_id:
           type: string
           description: Target resource id. Use a meeting sqid for meeting actions and a conversation UUID for conversation actions.
+        client_id:
+          type: string
+          nullable: true
+          maxLength: 32
+          description: Optional target client identifier. When provided, the command is broadcast to command.{user_id}.{client_id}; otherwise it is broadcast to command.{user_id}. The identifier is used for routing and is not included in the event payload.
+        payload:
+          type: object
+          additionalProperties: {}
+          x-typespec-name: Record<unknown>
+          nullable: true
+          description: Optional command-specific data forwarded unchanged in the Socket.IO event payload.
       description: Command request body
     ConversationDeleteResponse:
       type: object
@@ -2622,26 +2977,35 @@ components:
           type: integer
           format: int32
           description: Configured domain priority; lower values are returned first
-    JoinWaitlistRequest:
+    HealthConnections:
       type: object
       required:
-        - name
-        - email
+        - database
+        - redis
+        - echo
       properties:
-        name:
-          type: string
-          description: Full name of the person joining the waitlist
-        email:
-          type: string
-          description: Email address
-        company:
-          type: string
-          description: Company name (optional)
-        use_case:
-          type: string
-          maxLength: 100
-          description: Use case description (max 100 characters, optional)
-      description: Waitlist join request
+        database:
+          type: boolean
+          description: Whether a database connection can successfully execute a query within three seconds
+        redis:
+          type: boolean
+          description: Whether the Redis server responds to a ping within three seconds
+        echo:
+          type: boolean
+          description: Whether the Echo service responds to its connection-count endpoint within three seconds
+    HealthResponse:
+      type: object
+      required:
+        - success
+        - connections
+      properties:
+        success:
+          type: boolean
+          description: Whether all required service connections are healthy
+        connections:
+          allOf:
+            - $ref: '#/components/schemas/HealthConnections'
+          description: Connection status for each required service
     Models.BillingCycle:
       type: string
       enum:
@@ -2677,6 +3041,7 @@ components:
       enum:
         - goto_meeting
         - goto_conversation
+        - goto_meeting_embed
         - start_meeting
         - pause_meeting
         - start_conversation
@@ -3474,17 +3839,6 @@ components:
         Resource class: App\Http\Resources\ShareMeetingResource
         Note: Enum values are serialized as strings, all timestamps are Unix timestamps (seconds since epoch)
         Authentication: Requires auth.share middleware (JWT share token)
-    Models.StripeCallbackRequest:
-      type: object
-      required:
-        - session_id
-      properties:
-        session_id:
-          type: string
-          minLength: 30
-          maxLength: 120
-          description: Stripe checkout session ID
-      description: Stripe payment callback request
     Models.TranscriptionContext:
       type: object
       properties:
@@ -3789,6 +4143,7 @@ components:
         - level
         - start_at
         - end_at
+        - is_trial
         - config
       properties:
         id:
@@ -3813,6 +4168,9 @@ components:
           type: integer
           format: int64
           description: Plan expiration Unix timestamp (seconds since epoch)
+        is_trial:
+          type: boolean
+          description: Whether the plan is a trial plan
         config:
           allOf:
             - $ref: '#/components/schemas/Models.PlanConfig'
@@ -3900,6 +4258,16 @@ components:
         Used in WebSocket connections:
         - ws://localhost:9501/websocket/meeting
         - ws://localhost:9501/websocket/conversation
+    OnlineCountResponse:
+      type: object
+      required:
+        - online_count
+      properties:
+        online_count:
+          type: integer
+          format: int32
+          description: Total clients currently connected to the private room
+      description: Online count response
     PaginationMeta:
       type: object
       required:
