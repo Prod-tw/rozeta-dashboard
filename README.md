@@ -4,7 +4,7 @@ Authenticated control plane that lets administrators reconcile each Rozeta room 
 
 ## How to Run
 
-Use Go 1.25 and provide the required account CSV. The optional session CSV recommends and orders meetings but never automatically selects desired state.
+Use Go 1.25 and provide the required account and session CSV files. Startup loads `opass.json` once, keeps only meetings present in OPASS, the session mappings, and Rozeta, and fixes each room's meeting order by its OPASS start time. Cross-source unmatched meetings are ignored and logged; malformed data, duplicate IDs, or remote failures leave the server available only as a `503` diagnostic page.
 
 ```sh
 export ADMIN_PASSWORD='replace-with-a-strong-password'
@@ -17,7 +17,7 @@ The account CSV starts with `account,User ID,Token` or `帳號,User ID,Token`. C
 
 The versioned state file is authoritative and must be retained across restarts. Desired state contains the meeting ID, generation, and persisted automatic-Resume consumption record; lifecycle and run intent are process-local. An existing version 1 state file is atomically migrated to version 2 by preserving meeting IDs and generations and dropping `running`. Migration never starts reconciliation or sends a Rozeta command. A malformed or unsupported state file stops startup.
 
-Every process start leaves every room `suspended / ActiveSetUnknown`. Session data may recommend an initial meeting, but a room without persisted desired state remains `InitialMeetingRequired` until an administrator chooses one. Administrators explicitly start, stop, or force-stop rooms individually or through browser-captured bulk controls; every lifecycle action requires confirmation.
+Every process start leaves every room `suspended / ActiveSetUnknown`. A room without persisted desired state remains `InitialMeetingRequired` until an administrator chooses one. Administrators explicitly start, stop, or force-stop rooms individually or through browser-captured bulk controls; every lifecycle action requires confirmation. OPASS is not reloaded after startup; later Rozeta status reads ignore and log meetings outside the validated snapshot while preserving the OPASS ordering.
 
 The external `POST /api/v1/rooms/{room_name}/actions/advance-and-start` endpoint requires `Authorization: Bearer $EXTERNAL_API_TOKEN`. It advances only through meetings with a loaded `scheduled_start`, performs bounded remote preflight retries, and returns `503` without changing desired state if preflight cannot complete. The admin page keeps the failure visible as a room alert.
 

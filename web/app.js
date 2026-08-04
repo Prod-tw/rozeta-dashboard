@@ -4,12 +4,14 @@ import {
 	canObserve,
 	cloneReconciliationTargets,
 	confirmationTargets,
+	availableMeetingDates,
 	isCurrentVersion,
 	isPreflightFactsChanged,
 	reconciliationActionFor,
 	reconciliationRequestBody,
 	reconciliationTargets,
 	reconcileAuthoritativeRooms,
+	meetingsForDate,
 	roomNameIncludes,
 	shouldAcceptConflictSnapshot,
 	shouldAcceptSnapshot,
@@ -24,6 +26,7 @@ const state = {
 	rooms: new Map(),
 	meetings: new Map(),
 	selectedRoom: '',
+	selectedDate: '',
 	// WHY: visibility is a browser-local display preference, so hidden names stay separate from authoritative room state.
 	hiddenRooms: new Set(),
 	roomPickerDraft: new Set(),
@@ -42,6 +45,7 @@ const selectedRoomLabel = document.getElementById('selected-room-label')
 const roomDetails = document.getElementById('room-details')
 const roomMeetings = document.getElementById('room-meetings')
 const meetingsStatus = document.getElementById('meetings-status')
+const eventDaySelect = document.getElementById('event-day-select')
 const alerts = document.getElementById('alerts')
 const refreshButton = document.getElementById('refresh-btn')
 const applyDesiredButton = document.getElementById('apply-desired')
@@ -78,6 +82,10 @@ startAllButton.addEventListener('click', () => void beginBulkReconciliation('sta
 stopAllButton.addEventListener('click', () => void beginBulkReconciliation('stop'))
 forceStopAllButton.addEventListener('click', () => void beginBulkReconciliation('force-stop'))
 targetMeeting.addEventListener('input', () => (state.formDirty = true))
+eventDaySelect.addEventListener('change', () => {
+	state.selectedDate = eventDaySelect.value
+	render()
+})
 roomPickerSearch.addEventListener('input', renderRoomPicker)
 desiredConfirmationConfirm.addEventListener('click', () => {
 	const intent = state.pendingDesired
@@ -498,6 +506,7 @@ function applyAuthoritativeConflict(body, requestEpoch) {
 function render() {
 	renderRooms()
 	renderDetails()
+	renderEventDayPicker()
 	renderMeetings()
 	renderNotifications()
 	if (roomPickerDialog.open) renderRoomPicker()
@@ -715,7 +724,7 @@ function actionsMarkup(actions) {
 }
 
 function renderMeetings() {
-	const meetings = state.meetings.get(state.selectedRoom) || []
+	const meetings = meetingsForDate(state.meetings.get(state.selectedRoom), state.selectedDate)
 	const editable = canEditDesired(state.rooms.get(state.selectedRoom))
 	meetingsStatus.textContent = state.selectedRoom ? `${meetings.length} 場會議` : '請選擇房間'
 	roomMeetings.innerHTML = meetings.length
@@ -734,6 +743,22 @@ function renderMeetings() {
 			renderMeetings()
 		}),
 	)
+}
+
+function renderEventDayPicker() {
+	const dates = availableMeetingDates(state.meetings)
+	if (!dates.includes(state.selectedDate)) state.selectedDate = dates[0] || ''
+	eventDaySelect.disabled = dates.length === 0
+	eventDaySelect.innerHTML = dates
+		.map(date => `<option value="${date}">${escapeHtml(formatEventDate(date))}</option>`)
+		.join('')
+	eventDaySelect.value = state.selectedDate
+}
+
+function formatEventDate(dateKey) {
+	const date = new Date(`${dateKey}T00:00:00`)
+	if (Number.isNaN(date.getTime())) return dateKey
+	return new Intl.DateTimeFormat('zh-TW', { month: 'numeric', day: 'numeric', weekday: 'short' }).format(date)
 }
 
 function formatIDs(ids) {

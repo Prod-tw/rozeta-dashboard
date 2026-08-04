@@ -158,3 +158,25 @@ export function visibleRooms(rooms, hiddenRooms) {
 export function roomNameIncludes(roomName, pattern) {
 	return String(roomName).toLocaleLowerCase().includes(String(pattern).toLocaleLowerCase())
 }
+
+export function meetingDateKey(meeting) {
+	const date = new Date(meeting?.scheduled_start || '')
+	if (Number.isNaN(date.getTime())) return ''
+	const pad = value => String(value).padStart(2, '0')
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+export function availableMeetingDates(meetingsByRoom) {
+	const dates = new Set()
+	for (const meetings of meetingsByRoom.values()) {
+		for (const meeting of meetings || []) {
+			const date = meetingDateKey(meeting)
+			if (date) dates.add(date)
+		}
+	}
+	return Array.from(dates).sort()
+}
+
+export function meetingsForDate(meetings, dateKey) {
+	return (meetings || []).filter(meeting => meetingDateKey(meeting) === dateKey)
+}

@@ -147,32 +147,51 @@ func TestScheduleLoadDistinguishesRemoteFailureFromLocalConfiguration(t *testing
 	if !errors.As(err, &remoteErr) {
 		t.Fatalf("remote schedule error = %v, want scheduleRemoteError", err)
 	}
-	_, _, err = loadMeetingScheduleWithOptions(context.Background(), filepath.Join(t.TempDir(), "missing.csv"), scheduleLoadOptions{})
+	goodServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"sessions":[]}`))
+	}))
+	defer goodServer.Close()
+	_, _, err = loadMeetingScheduleWithOptions(context.Background(), filepath.Join(t.TempDir(), "missing.csv"), scheduleLoadOptions{url: goodServer.URL, client: goodServer.Client()})
 	if errors.As(err, &remoteErr) {
 		t.Fatalf("local schedule error = %v, must not be scheduleRemoteError", err)
 	}
 }
 
-func TestLoadMeetingScheduleDowngradesMissingAndInvalidStarts(t *testing.T) {
+func TestLoadMeetingScheduleIgnoresSessionMappingsMissingFromOPASS(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"sessions":[{"id":"INVALID","start":"2026-08-08T12:30:00+08:00"}]}`))
+	}))
+	defer server.Close()
+
+	schedule, _, err := loadMeetingScheduleWithOptions(
+		context.Background(),
+		writeSessionCSV(t, "議程 ID,Session ID\nmissing-meeting,MISSING\ninvalid-meeting,INVALID\n"),
+		scheduleLoadOptions{url: server.URL, client: server.Client()},
+	)
+	if err != nil {
+		t.Fatalf("loadMeetingScheduleWithOptions() error = %v, want unmatched mapping to be ignored", err)
+	}
+	if len(schedule.starts) != 1 {
+		t.Fatalf("schedule starts = %#v, want only the matched mapping", schedule.starts)
+	}
+}
+
+func TestLoadMeetingScheduleRejectsInvalidMappedStart(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("content-type", "application/json")
 		_, _ = writer.Write([]byte(`{"sessions":[{"id":"INVALID","start":"not-a-time"}]}`))
 	}))
 	defer server.Close()
 
-	schedule, warnings, err := loadMeetingScheduleWithOptions(
+	_, _, err := loadMeetingScheduleWithOptions(
 		context.Background(),
-		writeSessionCSV(t, "議程 ID,Session ID\nmissing-meeting,MISSING\ninvalid-meeting,INVALID\n"),
+		writeSessionCSV(t, "議程 ID,Session ID\ninvalid-meeting,INVALID\n"),
 		scheduleLoadOptions{url: server.URL, client: server.Client()},
 	)
-	if err != nil {
-		t.Fatalf("loadMeetingScheduleWithOptions() error = %v", err)
-	}
-	if !schedule.enabled || len(schedule.starts) != 0 {
-		t.Fatalf("schedule = %#v, want enabled schedule without known starts", schedule)
-	}
-	if len(warnings) != 2 {
-		t.Fatalf("warnings = %#v, want missing and invalid warnings", warnings)
+	if err == nil || !strings.Contains(err.Error(), "has invalid start time") {
+		t.Fatalf("loadMeetingScheduleWithOptions() error = %v, want invalid start error", err)
 	}
 }
 
@@ -236,6 +255,97 @@ func TestMeetingSchedulePrepareMeetingsFallsBackToTitleAndID(t *testing.T) {
 		if prepared[index].ID != meetingID {
 			t.Fatalf("prepared[%d].ID = %q, want %q", index, prepared[index].ID, meetingID)
 		}
+	}
+}
+
+func TestMeetingScheduleValidateMeetingsRequiresUniqueOPASSStarts(t *testing.T) {
+	start := time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)
+	schedule := meetingSchedule{
+		enabled:   true,
+		starts:    map[string]time.Time{"meeting-a": start, "meeting-b": start},
+		snapshots: make(map[string][]roomMeetingView),
+	}
+	_, err := schedule.validateStartupMeetings("room-a", []roomMeetingView{{ID: "meeting-a"}, {ID: "meeting-b"}})
+	if err == nil || !strings.Contains(err.Error(), "same opass start time") {
+		t.Fatalf("validateStartupMeetings() error = %v, want duplicate start error", err)
+	}
+	withDifferentOffsets := meetingSchedule{
+		enabled: true,
+		starts: map[string]time.Time{
+			"meeting-a": time.Date(2026, time.August, 8, 1, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)),
+			"meeting-b": time.Date(2026, time.August, 7, 17, 0, 0, 0, time.UTC),
+		},
+		snapshots: make(map[string][]roomMeetingView),
+	}
+	_, err = withDifferentOffsets.validateStartupMeetings("room-a", []roomMeetingView{{ID: "meeting-a"}, {ID: "meeting-b"}})
+	if err == nil || !strings.Contains(err.Error(), "same opass start time") {
+		t.Fatalf("validateStartupMeetings() with offsets error = %v, want duplicate instant error", err)
+	}
+}
+
+func TestMeetingScheduleKeepsStartupOrderWhileUpdatingStatus(t *testing.T) {
+	first := time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)
+	second := first.Add(time.Hour)
+	schedule := meetingSchedule{
+		enabled:   true,
+		starts:    map[string]time.Time{"meeting-a": first, "meeting-b": second},
+		snapshots: make(map[string][]roomMeetingView),
+	}
+	startup, err := schedule.validateStartupMeetings("room-a", []roomMeetingView{{ID: "meeting-b", Title: "B"}, {ID: "meeting-a", Title: "A"}})
+	if err != nil {
+		t.Fatalf("startup validation error = %v", err)
+	}
+	if startup[0].ID != "meeting-a" || startup[1].ID != "meeting-b" {
+		t.Fatalf("startup order = %#v, want meeting-a then meeting-b", startup)
+	}
+
+	live, err := schedule.validateMeetings("room-a", []roomMeetingView{
+		{ID: "meeting-b", Title: "B", Status: "paused"},
+		{ID: "meeting-a", Title: "A", Status: "in_progress"},
+	})
+	if err != nil {
+		t.Fatalf("live validation error = %v", err)
+	}
+	if live[0].ID != "meeting-a" || live[0].Status != "in_progress" || live[1].ID != "meeting-b" || live[1].Status != "paused" {
+		t.Fatalf("live meetings = %#v, want fixed order with updated statuses", live)
+	}
+}
+
+func TestMeetingScheduleIgnoresUnmatchedRozetaMeetings(t *testing.T) {
+	schedule := meetingSchedule{
+		enabled:   true,
+		starts:    map[string]time.Time{"meeting-a": time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)},
+		snapshots: make(map[string][]roomMeetingView),
+	}
+	startup, err := schedule.validateStartupMeetings("room-a", []roomMeetingView{{ID: "unmatched"}, {ID: "meeting-a", Title: "A"}})
+	if err != nil {
+		t.Fatalf("startup validation error = %v", err)
+	}
+	if len(startup) != 1 || startup[0].ID != "meeting-a" {
+		t.Fatalf("startup meetings = %#v, want only matched meeting", startup)
+	}
+
+	live, err := schedule.validateMeetings("room-a", []roomMeetingView{{ID: "unmatched"}})
+	if err != nil {
+		t.Fatalf("live validation error = %v, want unmatched meeting ignored", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("live meetings = %#v, want empty result", live)
+	}
+}
+
+func TestMeetingScheduleRejectsChangedMeetingIdentity(t *testing.T) {
+	schedule := meetingSchedule{
+		enabled:   true,
+		starts:    map[string]time.Time{"meeting-a": time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)},
+		snapshots: make(map[string][]roomMeetingView),
+	}
+	if _, err := schedule.validateStartupMeetings("room-a", []roomMeetingView{{ID: "meeting-a", Title: "Original"}}); err != nil {
+		t.Fatalf("startup validation error = %v", err)
+	}
+	_, err := schedule.validateMeetings("room-a", []roomMeetingView{{ID: "meeting-a", Title: "Changed"}})
+	if err == nil || !strings.Contains(err.Error(), "immutable metadata changed") {
+		t.Fatalf("validateMeetings() error = %v, want identity error", err)
 	}
 }
 

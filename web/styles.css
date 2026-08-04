@@ -106,6 +106,31 @@ button.loading::after {
 	color: var(--muted);
 }
 
+.event-day-picker {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 16px;
+	color: var(--muted);
+	font-size: 0.86rem;
+	font-weight: 700;
+}
+
+.event-day-picker select {
+	min-width: 150px;
+	padding: 0.65rem 2rem 0.65rem 0.8rem;
+	border: 1px solid rgba(167, 139, 250, 0.42);
+	border-radius: 10px;
+	background: #0a1325;
+	color: var(--text);
+	cursor: pointer;
+}
+
+.event-day-picker select:disabled {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+
 .eyebrow {
 	margin: 0 0 8px;
 	color: #a78bfa;
@@ -1003,6 +1028,19 @@ dialog::backdrop {
 	.dialog-actions {
 		display: flex;
 		justify-content: flex-end;
+	}
+}
+
+@media (max-width: 600px) {
+	.event-day-picker {
+		align-items: stretch;
+		flex-direction: column;
+		gap: 6px;
+		width: min(100%, 260px);
+	}
+
+	.event-day-picker select {
+		width: 100%;
 	}
 }
 

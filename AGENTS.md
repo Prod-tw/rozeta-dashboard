@@ -16,7 +16,7 @@ export EXTERNAL_API_TOKEN='replace-with-a-long-machine-token'
 go run . -account account.csv -session session.csv -state controller-state.json
 ```
 
-The account CSV is required. The session CSV is optional and only recommends and orders meetings; it never selects desired state. A room without persisted desired state remains `InitialMeetingRequired`. An existing malformed or unsupported state file stops startup. Version 1 state is atomically migrated to version 2 by preserving meeting ID and generation and dropping `running`; migration performs no reconciliation or remote command.
+The account and session CSV files are required. Startup loads OPASS once, keeps only the intersection of OPASS, session.csv, and Rozeta meetings, logs unmatched records, and fixes each room's meeting order by unique OPASS start time. Duplicate IDs, malformed retained data, remote failures, or other major anomalies leave the HTTP server running only as a `503` diagnostic page. A room without persisted desired state remains `InitialMeetingRequired`. An existing malformed or unsupported state file stops startup. Version 1 state is atomically migrated to version 2 by preserving meeting ID and generation and dropping `running`; migration performs no reconciliation or remote command.
 
 ## Debug
 

@@ -2,12 +2,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+	availableMeetingDates,
 	bufferRoomSnapshot,
 	canEditDesired,
 	canObserve,
 	cloneReconciliationTargets,
 	confirmationTargets,
 	isCurrentVersion,
+	meetingDateKey,
+	meetingsForDate,
 	isPreflightFactsChanged,
 	reconciliationActionFor,
 	reconciliationRequestBody,
@@ -240,4 +243,26 @@ test('room picker search uses case-insensitive substring matching only', () => {
 	assert.equal(roomNameIncludes('Room-A', 'ROOM'), true)
 	assert.equal(roomNameIncludes('Room-A', '*'), false)
 	assert.equal(roomNameIncludes('Room-A', '?'), false)
+})
+
+test('meeting dates use the browser local calendar date and sort chronologically', () => {
+	assert.equal(meetingDateKey({ scheduled_start: '2026-08-08T10:30:00+08:00' }), '2026-08-08')
+	assert.deepEqual(
+		availableMeetingDates(
+			new Map([
+				['room-a', [{ scheduled_start: '2026-08-09T10:00:00+08:00' }]],
+				['room-b', [{ scheduled_start: '2026-08-08T10:00:00+08:00' }]],
+			]),
+		),
+		['2026-08-08', '2026-08-09'],
+	)
+})
+
+test('meeting list filtering keeps only meetings for the selected date', () => {
+	const meetings = [
+		{ id: 'day-two', scheduled_start: '2026-08-09T09:00:00+08:00' },
+		{ id: 'day-one', scheduled_start: '2026-08-08T09:00:00+08:00' },
+	]
+	assert.deepEqual(meetingsForDate(meetings, '2026-08-08'), [meetings[1]])
+	assert.deepEqual(meetingsForDate(meetings, '2026-08-10'), [])
 })

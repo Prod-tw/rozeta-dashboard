@@ -90,3 +90,15 @@
 - `開始全部`, `停止全部`, and `強制停止全部` operate only on rooms visible when the batch button is pressed. The target list is frozen through preflight and confirmation.
 - Batch lifecycle eligibility remains unchanged: Start targets visible `suspended` rooms, Stop targets visible `starting` or `active` rooms, and Force-stop targets visible `stopping` rooms.
 - Hidden rooms are omitted from all batch requests. If no visible room is eligible, the corresponding batch button is disabled and sends no request.
+
+## Strict Meeting Schedule Validation
+
+- The admin meeting list is ordered strictly by the `start` time from the startup-loaded `opass.json` snapshot.
+- `-session` is required. The meeting list uses only the three-way intersection of OPASS, `session.csv`, and Rozeta meetings.
+- A valid OPASS/session mapping that is absent from Rozeta, an OPASS session absent from `session.csv`, or a Rozeta meeting absent from the other two sources is ignored as nonexistent and logged.
+- Every retained OPASS session must have a non-empty, valid RFC3339 `start`; duplicate IDs, empty IDs, invalid starts, and malformed CSV remain major errors.
+- Meeting start times must be unique within each room. Meetings with equal starts are a major error; no tie-break ordering is used.
+- Startup validation runs in order: load OPASS with bounded retries, load and validate `session.csv`, then fetch the complete paginated Rozeta meeting list for every room. OPASS failure stops later checks.
+- The HTTP server always starts. A startup or later major error puts the whole server in major-error mode: every route, API request, static asset request, and WebSocket upgrade returns a `503` major-error page, and no normal checks or handlers run.
+- The startup Rozeta meeting identity list is fixed after validation. Later status refreshes may update meeting status; added or removed unmatched meetings are ignored and logged, while fetch failures remain major errors. OPASS is never reloaded.
+- The major-error page shows safe diagnostic context such as phase, room, meeting/session IDs, an error summary, and time; credentials and complete remote response bodies are never exposed.

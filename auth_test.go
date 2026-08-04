@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -40,6 +41,30 @@ func TestProtectedRouteRequiresAdminSession(t *testing.T) {
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("authenticated status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
+func TestMajorErrorGateBlocksEveryRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
+	a.setMajorError("startup validation failed", errors.New("private remote response must not be exposed"))
+	router, err := a.router()
+	if err != nil {
+		t.Fatalf("router() error = %v", err)
+	}
+
+	for _, path := range []string{"/", "/api/login", "/assets/app.js", "/ws/admin"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s status = %d, want %d", path, recorder.Code, http.StatusServiceUnavailable)
+		}
+		if !strings.Contains(recorder.Body.String(), "startup validation failed") {
+			t.Errorf("%s body = %q, want safe major-error summary", path, recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), "private remote response") {
+			t.Errorf("%s exposed the detailed remote error", path)
+		}
 	}
 }
 

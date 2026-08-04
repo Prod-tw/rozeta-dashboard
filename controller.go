@@ -1280,9 +1280,73 @@ func (c *controller) notify(room *controllerRoom) {
 }
 
 func (c *controller) listMeetings(ctx context.Context, room *controllerRoom) ([]roomMeetingView, error) {
-	return runScheduled(ctx, c.scheduler, observationRequest, func(requestCtx context.Context) ([]roomMeetingView, error) {
+	meetings, err := c.fetchMeetings(ctx, room)
+	if err != nil {
+		return nil, err
+	}
+	if !c.schedule.enabled {
+		return meetings, nil
+	}
+	// Previously every full Rozeta read could replace the list and its order. The
+	// startup snapshot now owns identity and order; cross-source additions and
+	// removals are filtered as nonexistent while malformed retained data remains fatal.
+	validated, err := c.schedule.validateMeetings(room.name, meetings)
+	if err != nil {
+		c.app.setMajorError("live Rozeta meeting validation failed", err)
+		return nil, err
+	}
+	return validated, nil
+}
+
+func (c *controller) fetchMeetings(ctx context.Context, room *controllerRoom) ([]roomMeetingView, error) {
+	meetings, err := runScheduled(ctx, c.scheduler, observationRequest, func(requestCtx context.Context) ([]roomMeetingView, error) {
 		return c.app.fetchRozetaMeetings(requestCtx, room.token, "")
 	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		c.app.setMajorError("Rozeta meeting list request failed", err)
+	}
+	return meetings, err
+}
+
+func (c *controller) validateStartupMeetings(ctx context.Context) error {
+	c.mu.RLock()
+	rooms := make([]*controllerRoom, 0, len(c.rooms))
+	for _, room := range c.rooms {
+		rooms = append(rooms, room)
+	}
+	c.mu.RUnlock()
+	sort.Slice(rooms, func(left, right int) bool { return rooms[left].name < rooms[right].name })
+	seenMeetingIDs := make(map[string]string, len(c.schedule.starts))
+
+	for _, room := range rooms {
+		meetings, err := c.fetchMeetings(ctx, room)
+		if err != nil {
+			return fmt.Errorf("room %q: fetch Rozeta meetings: %w", room.name, err)
+		}
+		prepared, err := c.schedule.validateStartupMeetings(room.name, meetings)
+		if err != nil {
+			return err
+		}
+		for _, meeting := range prepared {
+			if previousRoom, duplicate := seenMeetingIDs[meeting.ID]; duplicate {
+				return fmt.Errorf("meeting %q appeared in rooms %q and %q", meeting.ID, previousRoom, room.name)
+			}
+			seenMeetingIDs[meeting.ID] = room.name
+		}
+		c.mu.Lock()
+		room.meetings = cloneMeetings(prepared)
+		room.desiredStatus = observedStatus(prepared, room.desired.MeetingID)
+		room.updatedAt = time.Now().UTC()
+		room.revision++
+		c.mu.Unlock()
+	}
+	for meetingID := range c.schedule.starts {
+		if _, found := seenMeetingIDs[meetingID]; !found {
+			log.Printf("ignoring unmatched session mapping: meeting_id=%q reason=meeting_not_in_rozeta", meetingID)
+			delete(c.schedule.starts, meetingID)
+		}
+	}
+	return nil
 }
 
 func (c *controller) listActiveMeetings(ctx context.Context, room *controllerRoom) ([]roomMeetingView, error) {

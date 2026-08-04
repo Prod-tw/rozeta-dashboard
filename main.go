@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,13 +47,20 @@ type app struct {
 	upgrader         websocket.Upgrader
 	controller       *controller
 	epoch            string
+	majorErrorMu     sync.RWMutex
+	majorError       *majorErrorState
+}
+
+type majorErrorState struct {
+	summary    string
+	occurredAt time.Time
 }
 
 func main() {
 	// The generic account filename replaces the previous room-token-specific CLI name
 	// so operators now provide the required credentials with -account.
 	accountFile := flag.String("account", "", "path to required account CSV file")
-	sessionFile := flag.String("session", "", "path to optional session CSV file")
+	sessionFile := flag.String("session", "", "path to required session CSV file")
 	stateFile := flag.String("state", "controller-state.json", "path to persistent controller state")
 	flag.Parse()
 
@@ -81,34 +90,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("load controller state: %v", err)
 	}
-	schedule := meetingSchedule{starts: make(map[string]time.Time)}
-	if strings.TrimSpace(*sessionFile) != "" {
-		var warnings []scheduleWarning
-		schedule, warnings, err = loadMeetingSchedule(ctx, *sessionFile)
-		if err != nil {
-			var remoteErr *scheduleRemoteError
-			if !errors.As(err, &remoteErr) {
-				log.Fatalf("load session schedule: %v", err)
-			}
-			// Session data only recommends ordering. Previously an OPASS outage could
-			// prevent rooms without persisted desired state from reaching
-			// InitialMeetingRequired; startup now continues without recommendations.
-			log.Printf("session schedule unavailable; continuing without recommendations: %v", err)
-			schedule = meetingSchedule{starts: make(map[string]time.Time)}
-		}
-		for _, warning := range warnings {
-			log.Printf(
-				"session schedule warning: line=%d meeting_id=%q session_id=%q reason=%s",
-				warning.Line,
-				warning.MeetingID,
-				warning.SessionID,
-				warning.Reason,
-			)
-		}
-		if len(warnings) > 0 {
-			log.Printf("session schedule loaded with %d warning(s)", len(warnings))
-		}
+	schedule := meetingSchedule{starts: make(map[string]time.Time), snapshots: make(map[string][]roomMeetingView)}
+	if strings.TrimSpace(*sessionFile) == "" {
+		err = errors.New("-session is required for strict meeting schedule validation")
+	} else {
+		schedule, _, err = loadMeetingSchedule(ctx, *sessionFile)
 	}
+	// Previously OPASS and session failures degraded to an unscheduled admin list.
+	// Keep the server reachable for diagnosis, but defer all normal handlers behind
+	// the major-error gate when this startup validation cannot complete.
+	startupScheduleErr := err
 
 	gin.SetMode(gin.ReleaseMode)
 	a := newApp(ctx, tokens, adminPassword, sessionSecret)
@@ -119,6 +110,11 @@ func main() {
 		log.Fatalf("load controller state: %v", err)
 	}
 	a.controller = controller
+	if startupScheduleErr != nil {
+		a.setMajorError("startup schedule validation failed", startupScheduleErr)
+	} else if err := controller.validateStartupMeetings(ctx); err != nil {
+		a.setMajorError("startup Rozeta meeting validation failed", err)
+	}
 	router, err := a.router()
 	if err != nil {
 		log.Fatalf("configure router: %v", err)
@@ -165,7 +161,7 @@ func newApp(ctx context.Context, tokens map[string]string, adminPassword string,
 		ctx:             ctx,
 		state:           newState(),
 		tokenStore:      tokens,
-		meetingSchedule: meetingSchedule{starts: make(map[string]time.Time)},
+		meetingSchedule: meetingSchedule{starts: make(map[string]time.Time), snapshots: make(map[string][]roomMeetingView)},
 		rozetaBaseURL:   "https://rozeta.app",
 		httpClient:      &http.Client{Timeout: 15 * time.Second},
 		adminPassword:   adminPassword,
@@ -198,7 +194,7 @@ func newProcessEpoch() string {
 
 func (a *app) router() (*gin.Engine, error) {
 	router := gin.New()
-	router.Use(gin.Recovery(), gin.Logger(), a.securityHeaders())
+	router.Use(a.majorErrorGate, gin.Recovery(), gin.Logger(), a.securityHeaders())
 	// Gin previously trusted forwarded client-IP headers from every peer. Only local
 	// reverse proxies may now supply them, so public clients cannot evade login limits.
 	if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
@@ -226,6 +222,38 @@ func (a *app) router() (*gin.Engine, error) {
 	protected.POST("/api/reconciliation/:action", a.requireSameOrigin, a.handleBulkReconciliation)
 	protected.GET("/ws/admin", a.handleAdminWS)
 	return router, nil
+}
+
+func (a *app) setMajorError(summary string, err error) {
+	if err != nil {
+		log.Printf("major error: %s: %v", summary, err)
+	}
+	a.majorErrorMu.Lock()
+	defer a.majorErrorMu.Unlock()
+	if a.majorError == nil {
+		a.majorError = &majorErrorState{summary: summary, occurredAt: time.Now().UTC()}
+	}
+}
+
+func (a *app) majorErrorGate(c *gin.Context) {
+	state := a.majorErrorSnapshot()
+	if state == nil {
+		c.Next()
+		return
+	}
+	a.writeMajorError(c, state)
+	c.Abort()
+}
+
+func (a *app) majorErrorSnapshot() *majorErrorState {
+	a.majorErrorMu.RLock()
+	defer a.majorErrorMu.RUnlock()
+	return a.majorError
+}
+
+func (a *app) writeMajorError(c *gin.Context, state *majorErrorState) {
+	page := fmt.Sprintf(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Major error</title></head><body><h1>Major error</h1><p>%s</p><p>Occurred at: %s</p><p>Check the server log and resolve the configuration or remote-data problem before retrying.</p></body></html>`, html.EscapeString(state.summary), html.EscapeString(state.occurredAt.Format(time.RFC3339)))
+	c.Data(http.StatusServiceUnavailable, "text/html; charset=utf-8", []byte(page))
 }
 
 func (a *app) handleAsset(c *gin.Context) {
@@ -381,6 +409,10 @@ func (a *app) handleRoomMeetings(c *gin.Context) {
 		return
 	}
 	if err != nil {
+		if state := a.majorErrorSnapshot(); state != nil {
+			a.writeMajorError(c, state)
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to load Rozeta meetings"})
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -16,8 +17,9 @@ import (
 const opassScheduleURL = "https://coscup.org/2026/api/opass.json"
 
 type meetingSchedule struct {
-	enabled bool
-	starts  map[string]time.Time
+	enabled   bool
+	starts    map[string]time.Time
+	snapshots map[string][]roomMeetingView
 }
 
 var (
@@ -70,11 +72,6 @@ func loadMeetingScheduleWithOptions(
 	path string,
 	options scheduleLoadOptions,
 ) (meetingSchedule, []scheduleWarning, error) {
-	mappings, warnings, err := loadSessionMappings(path)
-	if err != nil {
-		return meetingSchedule{}, nil, err
-	}
-
 	opass, err := fetchOPASSSchedule(ctx, options)
 	if err != nil {
 		return meetingSchedule{}, nil, &scheduleRemoteError{err: err}
@@ -83,33 +80,39 @@ func loadMeetingScheduleWithOptions(
 	if err != nil {
 		return meetingSchedule{}, nil, &scheduleRemoteError{err: err}
 	}
+	mappings, warnings, err := loadSessionMappings(path)
+	if err != nil {
+		return meetingSchedule{}, nil, err
+	}
+	if len(warnings) > 0 {
+		// Previously malformed session rows were warnings and the UI could silently
+		// fall back to API order. Strict startup validation now rejects them before
+		// any meeting list can be served without a complete schedule.
+		return meetingSchedule{}, nil, fmt.Errorf("session CSV contains invalid rows: %s", warnings[0].Reason)
+	}
 
 	starts := make(map[string]time.Time, len(mappings))
+	mappedSessionIDs := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
 		startValue, found := sessionStarts[mapping.sessionID]
 		if !found {
-			warnings = append(warnings, scheduleWarning{
-				Line:      mapping.line,
-				MeetingID: mapping.meetingID,
-				SessionID: mapping.sessionID,
-				Reason:    "session ID was not found in opass",
-			})
+			log.Printf("ignoring unmatched session mapping: csv_line=%d meeting_id=%q session_id=%q reason=session_not_in_opass", mapping.line, mapping.meetingID, mapping.sessionID)
 			continue
 		}
 		start, err := time.Parse(time.RFC3339, startValue)
 		if err != nil {
-			warnings = append(warnings, scheduleWarning{
-				Line:      mapping.line,
-				MeetingID: mapping.meetingID,
-				SessionID: mapping.sessionID,
-				Reason:    fmt.Sprintf("invalid opass start time %q", startValue),
-			})
-			continue
+			return meetingSchedule{}, nil, fmt.Errorf("session CSV line %d meeting %q has invalid opass start time %q", mapping.line, mapping.meetingID, startValue)
 		}
 		starts[mapping.meetingID] = start
+		mappedSessionIDs[mapping.sessionID] = struct{}{}
+	}
+	for sessionID := range sessionStarts {
+		if _, found := mappedSessionIDs[sessionID]; !found {
+			log.Printf("ignoring unmatched opass session: session_id=%q reason=session_not_in_session_csv", sessionID)
+		}
 	}
 
-	return meetingSchedule{enabled: true, starts: starts}, warnings, nil
+	return meetingSchedule{enabled: true, starts: starts, snapshots: make(map[string][]roomMeetingView)}, warnings, nil
 }
 
 func loadSessionMappings(path string) ([]sessionMapping, []scheduleWarning, error) {
@@ -247,43 +250,146 @@ func indexOPASSSessions(opass opassSchedule) (map[string]string, error) {
 	starts := make(map[string]string, len(opass.Sessions))
 	for _, session := range opass.Sessions {
 		id := strings.TrimSpace(session.ID)
+		if id == "" {
+			return nil, errors.New("opass contains a session with an empty ID")
+		}
+		start := strings.TrimSpace(session.Start)
+		if start == "" {
+			return nil, fmt.Errorf("opass session %q has an empty start time", id)
+		}
+		if _, err := time.Parse(time.RFC3339, start); err != nil {
+			return nil, fmt.Errorf("opass session %q has invalid start time %q", id, start)
+		}
 		if _, duplicate := starts[id]; duplicate {
 			return nil, fmt.Errorf("opass duplicates session ID %q", id)
 		}
-		starts[id] = strings.TrimSpace(session.Start)
+		starts[id] = start
 	}
 	return starts, nil
+}
+
+func (schedule *meetingSchedule) validateStartupMeetings(roomName string, meetings []roomMeetingView) ([]roomMeetingView, error) {
+	prepared, err := schedule.validateMeetings(roomName, meetings)
+	if err != nil {
+		return nil, err
+	}
+	if schedule.snapshots == nil {
+		schedule.snapshots = make(map[string][]roomMeetingView)
+	}
+	schedule.snapshots[roomName] = cloneMeetings(prepared)
+	return prepared, nil
+}
+
+func (schedule meetingSchedule) validateMeetings(roomName string, meetings []roomMeetingView) ([]roomMeetingView, error) {
+	if !schedule.enabled {
+		return nil, errScheduleUnavailable
+	}
+	seenStarts := make(map[int64]string, len(meetings))
+	prepared := make([]roomMeetingView, 0, len(meetings))
+	for _, meeting := range meetings {
+		start, found := schedule.starts[meeting.ID]
+		if !found {
+			log.Printf("ignoring unmatched Rozeta meeting: room=%q meeting_id=%q reason=meeting_not_in_opass_session_csv", roomName, meeting.ID)
+			continue
+		}
+		startInstant := start.UnixNano()
+		if previous, duplicate := seenStarts[startInstant]; duplicate {
+			return nil, fmt.Errorf("room %q meetings %q and %q have the same opass start time %s", roomName, previous, meeting.ID, start.Format(time.RFC3339))
+		}
+		seenStarts[startInstant] = meeting.ID
+		copy := meeting
+		copy.ScheduledStart = &start
+		prepared = append(prepared, copy)
+	}
+	if snapshot, found := schedule.snapshots[roomName]; found {
+		filtered := prepared[:0]
+		for _, meeting := range prepared {
+			if _, exists := meetingByID(snapshot, meeting.ID); !exists {
+				log.Printf("ignoring unmatched Rozeta meeting: room=%q meeting_id=%q reason=meeting_not_in_startup_snapshot", roomName, meeting.ID)
+				continue
+			}
+			filtered = append(filtered, meeting)
+		}
+		prepared = filtered
+		if err := validateMeetingIdentity(snapshot, prepared, roomName); err != nil {
+			return nil, err
+		}
+		current := make(map[string]roomMeetingView, len(prepared))
+		for _, meeting := range prepared {
+			current[meeting.ID] = meeting
+		}
+		ordered := make([]roomMeetingView, 0, len(snapshot))
+		for _, original := range snapshot {
+			if updated, found := current[original.ID]; found {
+				ordered = append(ordered, updated)
+			}
+		}
+		return ordered, nil
+	}
+	sort.Slice(prepared, func(left, right int) bool {
+		return prepared[left].ScheduledStart.Before(*prepared[right].ScheduledStart)
+	})
+	return prepared, nil
+}
+
+func validateMeetingIdentity(snapshot, current []roomMeetingView, roomName string) error {
+	currentIDs := make(map[string]struct{}, len(current))
+	for _, meeting := range current {
+		currentIDs[meeting.ID] = struct{}{}
+	}
+	for _, original := range snapshot {
+		if _, found := currentIDs[original.ID]; !found {
+			log.Printf("ignoring missing Rozeta meeting: room=%q meeting_id=%q reason=meeting_not_in_current_rozeta_result", roomName, original.ID)
+		}
+	}
+	for _, meeting := range current {
+		original, found := meetingByID(snapshot, meeting.ID)
+		if !found {
+			continue
+		}
+		if meeting.Title != original.Title || meeting.Source != original.Source || meeting.Target != original.Target {
+			return fmt.Errorf("room %q meeting %q immutable metadata changed", roomName, original.ID)
+		}
+	}
+	return nil
+}
+
+func cloneMeetings(meetings []roomMeetingView) []roomMeetingView {
+	cloned := append([]roomMeetingView{}, meetings...)
+	for index := range cloned {
+		if cloned[index].ScheduledStart != nil {
+			start := *cloned[index].ScheduledStart
+			cloned[index].ScheduledStart = &start
+		}
+	}
+	return cloned
 }
 
 func (schedule meetingSchedule) prepareMeetings(meetings []roomMeetingView) []roomMeetingView {
 	prepared := append([]roomMeetingView{}, meetings...)
 	if !schedule.enabled {
-		// The admin list previously inherited Rozeta pagination order. Without a session
-		// schedule, title and ID now provide a deterministic fallback order.
 		sort.Slice(prepared, func(left, right int) bool {
 			return meetingTitleBefore(prepared[left], prepared[right])
 		})
 		return prepared
 	}
-
 	for index := range prepared {
 		if start, found := schedule.starts[prepared[index].ID]; found {
 			prepared[index].ScheduledStart = &start
 		}
 	}
-	// Scheduled meetings previously appeared in Rozeta's API order. Stable sorting now
-	// follows the event timetable while preserving API order among unknown meetings.
-	sort.SliceStable(prepared, func(left, right int) bool {
-		leftStart := prepared[left].ScheduledStart
-		rightStart := prepared[right].ScheduledStart
-		if leftStart == nil || rightStart == nil {
-			return leftStart != nil
-		}
-		if !leftStart.Equal(*rightStart) {
-			return leftStart.Before(*rightStart)
-		}
-		return meetingTitleBefore(prepared[left], prepared[right])
-	})
+	if schedule.enabled {
+		sort.Slice(prepared, func(left, right int) bool {
+			leftStart, rightStart := prepared[left].ScheduledStart, prepared[right].ScheduledStart
+			if leftStart == nil || rightStart == nil {
+				return leftStart != nil
+			}
+			if !leftStart.Equal(*rightStart) {
+				return leftStart.Before(*rightStart)
+			}
+			return meetingTitleBefore(prepared[left], prepared[right])
+		})
+	}
 	return prepared
 }
 
