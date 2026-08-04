@@ -1,9 +1,11 @@
 {
 	"name": "coscup-caption-admin",
 	"private": true,
+	"type": "module",
 	"scripts": {
 		"format": "prettier --write web .prettierrc package.json",
-		"format:check": "prettier --check web .prettierrc package.json"
+		"format:check": "prettier --check web .prettierrc package.json",
+		"test": "node --test web/state.test.js"
 	},
 	"devDependencies": {
 		"prettier": "latest",

@@ -2,62 +2,64 @@
 
 ## Overview
 
-The service manages Rozeta room accounts without browser automation. A single Go process serves the authenticated admin UI, calls Rozeta APIs with room-scoped tokens, tracks command state, and pushes updates to admin browsers over WebSocket.
+The service is a declarative controller for Rozeta room accounts. Each account token is exclusively owned by its room controller, which may Start, Resume, and Pause any meeting returned for that account. Persisted desired state identifies a meeting and generation; Rozeta responses are observations, never desired state.
 
-## Control Flow
+Reconciliation lifecycle is process-local and is never persisted. Its states are `suspended`, `starting`, `active`, and `stopping`. Every process start leaves every room `suspended / ActiveSetUnknown` until an administrator starts it. Active means the controller is maintaining the room invariant, not that the remote desired meeting has already reached `in_progress`.
 
-1. The server strictly loads rooms and tokens from the required CSV.
-2. When `-session` is provided, the server joins its Rozeta meeting IDs to one startup snapshot of the COSCUP opass schedule.
-3. Each room starts in `syncing` while the server loads its Rozeta meetings.
-4. The server refreshes all rooms every 10 seconds with at most six concurrent requests and a two-second deadline per room.
-5. The admin submits Goto, Start, Pause, or Resume for one room.
-6. The server permits only one pending command per room and returns a command ID.
-7. Admin WebSocket snapshots preserve loading state across page reloads and reconnects.
+## Desired State and Persistence
 
-## Meeting Schedule
+`-state` selects a versioned JSON file, defaulting to `controller-state.json`. Version 2 persists only each room's `meeting_id`, `generation`, and consumed automatic-Resume record. The consumption record includes the generation and completed meeting `updated_at` that authorised the destructive operation. Lifecycle and remote observations are not persisted.
 
-The optional session CSV maps `議程 ID` (Rozeta meeting ID) to `Session ID` (opass session ID). The server downloads `https://coscup.org/2026/api/opass.json` once at startup and retries every fetch, HTTP, or JSON failure up to three total attempts with ten-second request timeouts and one- then two-second delays.
+Writes use a synced temporary file and atomic rename. A desired update is not visible in memory unless persistence succeeds. A malformed, unsupported, or invalid existing file stops startup. Version 1 is atomically migrated by preserving meeting ID and generation and dropping `running`; migration never starts reconciliation or sends a remote command.
 
-The room meetings API is the only sorting authority. Known meetings sort by RFC 3339 start time, then Unicode title and meeting ID. Unknown meetings follow all known meetings while retaining their relative Rozeta order. Without `-session`, all meetings sort by Unicode title and meeting ID. The API includes `schedule_enabled` and optional `scheduled_start`; the admin formats known starts in `Asia/Taipei` as `MM/DD HH:mm` and labels unmatched meetings `未排程`.
+Session schedule data only recommends and orders meetings. It never automatically selects one. A room without persisted desired state reports `InitialMeetingRequired`. A suspended room may persist a desired meeting or re-arm a generation without remote commands. An active desired update increments generation and reconciles immediately; selecting a completed desired meeting requires destructive preflight and confirmation before the new generation is accepted.
 
-Duplicate meeting IDs or session IDs in the CSV and duplicate opass session IDs stop startup because they make the join ambiguous. Empty CSV IDs, missing opass sessions, and invalid start times are logged individually and summarized, then degrade those meetings to unscheduled. Titles and rooms are deliberately not compared because IDs are authoritative and schedule edits can leave descriptive CSV fields stale.
+Re-sending the same desired meeting does not implicitly re-arm automatic Resume. A dedicated destructive re-arm operation increments generation for that same meeting and grants the new generation one allowance.
 
-## Current Meeting
+## Active-Set Reconciliation
 
-A successful Goto target is authoritative for the rest of that server process. Without a Goto target, synchronization selects a unique `in_progress` meeting, then a unique `paused` meeting. Multiple matching meetings or only ready meetings leave the current meeting unresolved, so Start and Pause require Goto first.
+The authoritative running observation is the complete paginated result of `GET /api/v1/meetings?status=in_progress` for the room account. While active, the eventual invariant is:
 
-This is meeting state, not browser presence. Removing the userscript means the service cannot determine whether a room browser is online or confirm that Goto changed its route.
+```text
+active meeting IDs == {desired meeting ID}
+```
 
-## Commands
+Convergence is reported only after a fresh active-set observation proves this equality. Each room uses one serial actor and one coalesced `Observe -> Diff -> Act -> Requeue` path. Events, timers, requests, results, and completions are fenced by reconciliation run and desired generation. The active set is polled every five seconds and immediately after control commands.
 
-- Goto calls `POST /api/v1/commands` with `goto_meeting` and completes when Rozeta accepts the request.
-- Start and Pause call `start_meeting` or `pause_meeting`, then query the target every 500 milliseconds.
-- A matching meeting status is success even if the command request itself returned an error.
-- Confirmation stops after 15 seconds. A later periodic match changes the result to `confirmed_late`.
-- Network ambiguity never triggers an automatic command retry.
-- Resume calls `POST /api/v1/meetings/{id}/resume` and confirms the resulting `ready` status.
+Reconciliation is availability-first and eventually unique. If the desired meeting is absent from the active set, the controller attempts the complete ordered Goto pair, then reconciles the desired status even if Goto failed or its outcome is unknown. Goto sends `goto_meeting` first and OBS-targeted `goto_meeting_embed` second. A subsequent round repeats Goto before Start or Resume while desired remains absent. Once desired is observed `in_progress`, its route is treated as correct and Goto stops.
 
-Resume is destructive: Rozeta permanently deletes transcription and translation data. The UI requires a separate confirmation but does not combine Resume with Goto or Start.
+Desired meeting transitions are:
 
-## State
+- `ready` or `paused`: send Start.
+- `in_progress`: send no Start.
+- `completed`: automatically Resume at most once for the desired generation, then Start as required.
 
-Room and command state is in memory. It contains the current meeting, Rozeta API health, last successful sync, last command result, and at most one pending command. Admin page reloads recover this state, but a backend restart intentionally discards command history and prior Goto targets.
+Automatic Resume consumption is persisted atomically before dispatch. A crash, timeout, or unknown result therefore cannot cause another destructive Resume in the same generation. Start confirmation grants the allowance for the current generation. If that generation later remains or returns `completed` after consumption, the room stays `active / Blocked / ResumeLimitReached`, continues observing, and does not Resume again.
 
-Transient synchronization failures retain the last known meeting state and mark the room `stale`. Start and Pause are disabled while stale because their target cannot be resolved safely; Goto remains available because it has an explicit target. Authentication failures disable the room until a later synchronization succeeds.
+Only after desired is observed `in_progress` does the controller Pause every other active meeting. A failed cleanup Pause leaves desired available, reports `MultipleInProgress / Degraded`, and is retried after observation. If desired is missing, inaccessible, or cannot be started, existing active meetings are preserved; only explicit Stop targets them for Pause.
 
-## Authentication
+Start, Pause, and Resume are observation-driven. At most one command is dispatched per reconcile round, followed by a fresh observation before another dispatch. Resume is never blindly retried within an HTTP retry loop. All Rozeta requests share a six-request scheduler with control-request priority.
 
-`ADMIN_PASSWORD` and a `SESSION_SECRET` of at least 32 bytes are required at startup. A successful login receives an HMAC-signed, `HttpOnly`, `Secure`, `SameSite=Strict` cookie with a fixed 72-hour lifetime. The admin page, room APIs, command API, logout, and admin WebSocket all validate it.
+## Start and Preflight
 
-Failed login attempts are limited in memory to ten per direct client IP in five minutes. Security headers prohibit framing, cross-origin form actions, inline scripts, and cross-origin API requests.
+Start preflight reads each frozen target's desired status and complete active set. It exposes completed meetings and destructive Resume risk before confirmation. Start and active desired-change confirmation explicitly warn that Resume permanently deletes completed transcripts and translations.
 
-## Design Considerations
+Start All preflight may partially succeed: rooms whose remote state cannot be observed remain suspended, while observable rooms may enter `starting` and then `active`. Before remote preflight, the request atomically validates the process epoch, unique valid room names, and every expected reconciliation run. The browser uses the room list frozen when confirmation opened; omitted rooms are unaffected.
 
-- Direct Rozeta commands avoid selectors and DOM changes that made browser automation fragile.
-- API success for Goto is dispatch confirmation, not browser execution confirmation.
-- Start and Pause use outcome-based confirmation because meeting status is more useful than command transport status.
-- Per-room exclusion prevents overlapping commands while allowing different rooms to operate concurrently.
-- Strict CSV parsing fails early instead of silently omitting a room or choosing between duplicate credentials.
-- Schedule sorting is limited to API responses so it cannot change current-meeting inference or command behavior.
-- The opass schedule is immutable for one process lifetime; operators restart the service to pick up event schedule changes.
-- No database is added because runtime command history is operational rather than durable data.
+## Stop and Force-Stop
+
+Normal Stop is a declarative transition to an empty active set. Its preflight observes and displays every current `in_progress` meeting. If the active set cannot be observed, normal Stop is not accepted; the administrator may retry or force-stop.
+
+Once accepted, Stop immediately disables automatic Resume and rejects new Goto, Start, Resume, desired-update, and ordinary reconcile work. One HTTP request dispatched before acceptance may finish or time out, but no later step from that old reconcile sequence may begin. The stopping loop repeatedly observes the active set and Pauses every active meeting. It becomes suspended only after a fresh observation proves the set is empty.
+
+A stopping room exposes Force-stop immediately and automatically force-stops after 30 seconds. Force-stop invalidates and ignores local old-run work but cannot revoke a command already accepted by Rozeta. It transitions immediately to `suspended / RemoteOutcomeUnknown` and permits a new Start. A successful normal Stop retains `LastStopConfirmedEmpty` as a stale historical observation; suspension never claims the remote active set is still empty.
+
+## Operations and UI
+
+All per-room and bulk Start, Stop, and Force-stop actions require confirmation. Per-room actions require the expected reconciliation run. Bulk actions atomically validate process epoch, unique room names, and all expected runs before changing any room. A conflict changes no rooms and returns the authoritative snapshot.
+
+Snapshots expose lifecycle, reconciliation run, desired meeting and generation, desired status, active meeting IDs, active-set observation time and staleness, recent actions, errors, and structured conditions. Core conditions are `ReconciliationActive`, `DesiredMeetingSoleInProgress`, `ActiveSetObserved`, and the latest Goto dispatch result. A random process epoch separates revision counters across restarts; authoritative full snapshots remove absent rooms and meeting caches, and clients ignore incremental snapshots from an old epoch.
+
+Summary states include `Converged / DesiredMeetingSoleInProgress`, `Reconciling / StartingDesiredMeeting`, `Degraded / MultipleInProgress`, `Blocked / DesiredMeetingMissing`, `Blocked / ResumeLimitReached`, `Reconciling / PausingAllMeetings`, `Suspended / ActiveSetUnknown`, `Suspended / LastStopConfirmedEmpty`, and `Suspended / RemoteOutcomeUnknown`.
+
+The current persistence design supports one controller process. Multiple replicas require leader election.

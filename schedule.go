@@ -46,6 +46,11 @@ type scheduleLoadOptions struct {
 	retryDelays []time.Duration
 }
 
+type scheduleRemoteError struct{ err error }
+
+func (e *scheduleRemoteError) Error() string { return e.err.Error() }
+func (e *scheduleRemoteError) Unwrap() error { return e.err }
+
 func loadMeetingSchedule(ctx context.Context, path string) (meetingSchedule, []scheduleWarning, error) {
 	return loadMeetingScheduleWithOptions(ctx, path, scheduleLoadOptions{
 		url:         opassScheduleURL,
@@ -66,11 +71,11 @@ func loadMeetingScheduleWithOptions(
 
 	opass, err := fetchOPASSSchedule(ctx, options)
 	if err != nil {
-		return meetingSchedule{}, nil, err
+		return meetingSchedule{}, nil, &scheduleRemoteError{err: err}
 	}
 	sessionStarts, err := indexOPASSSessions(opass)
 	if err != nil {
-		return meetingSchedule{}, nil, err
+		return meetingSchedule{}, nil, &scheduleRemoteError{err: err}
 	}
 
 	starts := make(map[string]time.Time, len(mappings))

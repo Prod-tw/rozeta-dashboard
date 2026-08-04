@@ -118,6 +118,7 @@ button.loading::after {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
+	flex-wrap: wrap;
 	gap: 8px;
 }
 
@@ -291,6 +292,12 @@ button.loading::after {
 	font-size: 18px;
 }
 
+.panel-header > div:first-child > span {
+	display: block;
+	margin-top: 4px;
+	color: var(--muted);
+}
+
 .panel-header-actions {
 	display: grid;
 	grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -357,24 +364,30 @@ thead th {
 
 th:first-child,
 #rooms-body td:first-child:not([colspan]) {
-	width: 40%;
+	width: 38%;
 	overflow-wrap: anywhere;
 }
 
 th:nth-child(2),
-#rooms-body td:nth-child(2),
-th:nth-child(3),
-#rooms-body td:nth-child(3) {
-	width: 30%;
+#rooms-body td:nth-child(2) {
+	width: 35%;
 }
 
-/* Mobile previously squeezed all five columns into a horizontal scroller. Keep the three operational fields visible;
-   the selected room's full meeting and sync details remain available immediately below in the command panel. */
+/* Lifecycle actions must remain usable on mobile. The previous compact table showed desired and observed state; those
+   details now remain in the selected-room panel while room, lifecycle, and its action stay visible in each row. */
+th:nth-child(3),
+#rooms-body td:nth-child(3),
 th:nth-child(4),
 #rooms-body td:nth-child(4),
 th:nth-child(5),
 #rooms-body td:nth-child(5) {
 	display: none;
+}
+
+th:nth-child(6),
+#rooms-body td:nth-child(6) {
+	width: 27%;
+	text-align: right;
 }
 
 /* The last-sync timestamp previously wrapped into several short lines on narrow screens. Keep meaningful timestamps
@@ -421,7 +434,8 @@ tbody tr:focus-visible {
 }
 
 .status.in_progress,
-.status.running {
+.status.active,
+.status.starting {
 	background: rgba(124, 58, 237, 0.18);
 	color: #c4b5fd;
 }
@@ -429,6 +443,34 @@ tbody tr:focus-visible {
 .status.paused {
 	background: rgba(245, 158, 11, 0.18);
 	color: #fcd34d;
+}
+
+.status.stopping {
+	background: rgba(245, 158, 11, 0.18);
+	color: #fcd34d;
+}
+
+.status.suspended {
+	background: rgba(148, 163, 184, 0.15);
+	color: #cbd5e1;
+}
+
+.run-number {
+	display: block;
+	margin-top: 5px;
+	color: var(--muted);
+	font-size: 0.72rem;
+	white-space: nowrap;
+}
+
+.row-action {
+	padding: 0.55rem 0.7rem;
+	white-space: nowrap;
+}
+
+.stale-observation {
+	color: #fcd34d;
+	font-size: 0.86rem;
 }
 
 .status.switching {
@@ -530,6 +572,36 @@ tbody tr:focus-visible {
 	margin: 0;
 	color: var(--text);
 	overflow-wrap: anywhere;
+}
+
+/* WHY: the old detail panel flattened one condition and one action into scalar fields. The active-set contract now
+   exposes ordered structured collections, so compact rows preserve every reason, timestamp, and dispatch error. */
+.detail-stack {
+	grid-template-columns: 1fr;
+}
+
+.structured-list {
+	display: grid;
+	gap: 7px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.structured-list li {
+	display: grid;
+	gap: 2px;
+	padding-left: 10px;
+	border-left: 2px solid var(--line);
+}
+
+.structured-list span {
+	color: var(--muted);
+	font-size: 0.84rem;
+}
+
+.error-text {
+	color: #fca5a5 !important;
 }
 
 .meeting-list-header {
@@ -749,11 +821,63 @@ dialog::backdrop {
 	line-height: 1.6;
 }
 
+.confirmation-target {
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: #0a1325;
+	color: var(--text) !important;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	overflow-wrap: anywhere;
+}
+
 .dialog-actions {
 	display: grid;
 	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 10px;
 	margin-top: 20px;
+}
+
+.dialog-room-list {
+	display: grid;
+	gap: 8px;
+	max-height: min(32dvh, 260px);
+	margin: 14px 0 0;
+	padding: 10px 2px;
+	overflow: auto;
+	border-block: 1px solid var(--line);
+	color: var(--text);
+}
+
+/* WHY: confirmations previously listed room names only. Fresh preflight evidence is now grouped per frozen target so
+   unobservable rooms, destructive Resume risk, and every meeting that Stop will Pause remain visible on mobile. */
+.preflight-room {
+	display: grid;
+	gap: 4px;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.preflight-room span,
+.preflight-room b {
+	font-size: 0.85rem;
+}
+
+.preflight-room.high-risk {
+	border-color: rgba(239, 68, 68, 0.45);
+	background: rgba(239, 68, 68, 0.1);
+}
+
+.preflight-room.high-risk b,
+.preflight-room.unobservable span {
+	color: #fca5a5;
+}
+
+.preflight-room.unobservable {
+	border-color: rgba(245, 158, 11, 0.4);
+	background: rgba(245, 158, 11, 0.08);
 }
 
 .login-page {
@@ -908,15 +1032,24 @@ dialog::backdrop {
 	th:nth-child(2),
 	#rooms-body td:nth-child(2),
 	th:nth-child(3),
-	#rooms-body td:nth-child(3) {
+	#rooms-body td:nth-child(3),
+	th:nth-child(6),
+	#rooms-body td:nth-child(6) {
 		width: auto;
 	}
 
+	th:nth-child(3),
+	#rooms-body td:nth-child(3),
 	th:nth-child(4),
 	#rooms-body td:nth-child(4),
 	th:nth-child(5),
 	#rooms-body td:nth-child(5) {
 		display: table-cell;
+	}
+
+	th:nth-child(6),
+	#rooms-body td:nth-child(6) {
+		text-align: left;
 	}
 
 	.status {

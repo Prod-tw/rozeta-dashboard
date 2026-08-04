@@ -1,2 +1,3 @@
 *.csv
 node_modules/
+controller-state.json

@@ -1,0 +1,76 @@
+# External API
+
+## 切換至下一場並啟動 reconciliation
+
+讓外部系統透過單一明確確認，要求指定 room 將排程中的下一個 meeting 設為 desired meeting，並在需要時啟動 reconciliation。
+
+```http
+POST /api/v1/rooms/{room_name}/actions/advance-and-start
+Authorization: Bearer <external-api-token>
+```
+
+此 API 不接受啟停布林狀態。POST 本身代表呼叫端已確認 Start，以及 completed meeting 可能觸發的破壞性自動 Resume；呼叫端必須先向操作者警告 Resume 會永久刪除已完成的逐字稿與翻譯。
+
+### 行為
+
+1. 以目前 persisted desired meeting 為基準，依排程選擇下一個 meeting。
+2. 驗證 room 未在 `stopping`，並以目前 process epoch 與 reconciliation run 防止舊操作影響新 run。
+3. Preflight 讀取下一個 meeting 的最新狀態，以及完整分頁的 `status=in_progress` active set。
+4. Preflight 成功後，將下一個 meeting 與新 generation 原子寫入 state v2；新 generation 取得一次自動 Resume 額度。
+5. 若 room 為 `suspended`，建立新 run 並依序進入 `starting`、`active`；若已是 `active`，立即 reconcile 新 generation。
+6. Reconciliation 先讓新 desired meeting 達到 `in_progress`，確認後才 Pause 其他 active meetings，最終收斂至 active set 恰為 `{desired}`。
+
+「下一場」只考慮具有 `scheduled_start` 的 meeting，並依 `scheduled_start`、title、ID 排序。未排程的 meeting 不使用 Rozeta API 回傳順序推測位置。Session schedule 只提供推薦與排序，不會自行選擇 desired meeting。
+
+若下一場為 `completed`，controller 會在 dispatch 前原子記錄該 generation 與 completed `updated_at` 已消耗自動 Resume。即使 Resume timeout、結果不明或程序重啟，同一 generation 也不會再次自動 Resume。再次傳送相同 desired update 不會重新取得額度；必須使用獨立的破壞性 re-arm 操作建立新 generation。
+
+`202 Accepted` 只表示 desired generation 與 lifecycle 操作已接受，不表示 Rozeta 已完成 Goto、Start、Resume 或舊 meeting cleanup。呼叫端應透過管理 snapshot 追蹤 lifecycle、active meeting IDs 與 condition。
+
+### 成功回應
+
+```http
+HTTP/1.1 202 Accepted
+Content-Type: application/json
+```
+
+```json
+{
+	"room_name": "R0",
+	"meeting_id": "meeting-b",
+	"generation": 8,
+	"lifecycle": "starting",
+	"status": "accepted"
+}
+```
+
+### 錯誤回應
+
+| HTTP | `code` | 情況 |
+| --- | --- | --- |
+| `401` | `authentication_required` | API token 缺少或無效 |
+| `404` | `room_not_found` | room 不存在 |
+| `409` | `current_meeting_unset` | room 尚未設定目前的 desired meeting |
+| `409` | `current_meeting_unscheduled` | 目前的 desired meeting 不在排程內 |
+| `409` | `next_meeting_not_found` | 目前的 desired meeting 已是排程中的最後一場 |
+| `409` | `room_stopping` | room 正在停止，無法接受新操作 |
+| `409` | `stale_controller_state` | process epoch 或 reconciliation run 已過期 |
+| `503` | `preflight_unavailable` | 無法完整觀察下一場狀態或 active set；不接受 desired generation，也不啟動 room |
+| `503` | `schedule_unavailable` | 沒有可用的 meeting 排程 |
+
+錯誤回應使用以下格式：
+
+```json
+{
+	"error": {
+		"code": "next_meeting_not_found",
+		"message": "the room is already at the final scheduled meeting"
+	}
+}
+```
+
+## Lifecycle 操作共通規則
+
+- Start、Stop、Force-stop 都是需明確確認的操作；bulk 操作只處理確認流程凍結的 room 清單。
+- Normal Stop 的 remote target 是空 active set。Preflight 會列出即將 Pause 的所有 `in_progress` meetings；active set 無法完整觀察時不接受 normal Stop。
+- Stop 接受後會停用自動 Resume、拒絕新 Goto/Start/Resume/desired update，並反覆 Observe、Pause，直到 fresh observation 確認 active set 為空才回到 `suspended`。
+- `stopping` 立即提供 Force-stop，30 秒後也會自動 force-stop。Force-stop 取消並忽略舊 run 的本機工作，但無法撤回 Rozeta 已接受的命令，因此結果為 `suspended / RemoteOutcomeUnknown`。

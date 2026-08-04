@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,8 +15,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -26,27 +28,22 @@ import (
 var webAssets embed.FS
 
 const (
-	roomSyncInterval        = 10 * time.Second
-	commandPollInterval     = 500 * time.Millisecond
-	commandConfirmationTime = 15 * time.Second
-	roomSyncConcurrency     = 6
-	roomSyncRequestTimeout  = 2 * time.Second
-	roomSyncCycleTimeout    = 9 * time.Second
+	roomSyncConcurrency = 6
 )
 
 type app struct {
-	ctx              context.Context
-	state            *state
-	tokenStore       map[string]string
-	meetingSchedule  meetingSchedule
-	rozetaBaseURL    string
-	httpClient       *http.Client
-	adminPassword    string
-	sessionSecret    []byte
-	loginLimiter     *loginLimiter
-	confirmationTime time.Duration
-	pollInterval     time.Duration
-	upgrader         websocket.Upgrader
+	ctx             context.Context
+	state           *state
+	tokenStore      map[string]string
+	meetingSchedule meetingSchedule
+	rozetaBaseURL   string
+	httpClient      *http.Client
+	adminPassword   string
+	sessionSecret   []byte
+	loginLimiter    *loginLimiter
+	upgrader        websocket.Upgrader
+	controller      *controller
+	epoch           string
 }
 
 func main() {
@@ -54,6 +51,7 @@ func main() {
 	// so operators now provide the required credentials with -account.
 	accountFile := flag.String("account", "", "path to required account CSV file")
 	sessionFile := flag.String("session", "", "path to optional session CSV file")
+	stateFile := flag.String("state", "controller-state.json", "path to persistent controller state")
 	flag.Parse()
 
 	if strings.TrimSpace(*accountFile) == "" {
@@ -74,12 +72,24 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	_, err = loadDesiredStateFile(*stateFile)
+	if err != nil {
+		log.Fatalf("load controller state: %v", err)
+	}
 	schedule := meetingSchedule{starts: make(map[string]time.Time)}
 	if strings.TrimSpace(*sessionFile) != "" {
 		var warnings []scheduleWarning
 		schedule, warnings, err = loadMeetingSchedule(ctx, *sessionFile)
 		if err != nil {
-			log.Fatalf("load session schedule: %v", err)
+			var remoteErr *scheduleRemoteError
+			if !errors.As(err, &remoteErr) {
+				log.Fatalf("load session schedule: %v", err)
+			}
+			// Session data only recommends ordering. Previously an OPASS outage could
+			// prevent rooms without persisted desired state from reaching
+			// InitialMeetingRequired; startup now continues without recommendations.
+			log.Printf("session schedule unavailable; continuing without recommendations: %v", err)
+			schedule = meetingSchedule{starts: make(map[string]time.Time)}
 		}
 		for _, warning := range warnings {
 			log.Printf(
@@ -98,12 +108,21 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	a := newApp(ctx, tokens, adminPassword, sessionSecret)
 	a.meetingSchedule = schedule
+	controller, err := newController(ctx, a, tokens, schedule, *stateFile)
+	if err != nil {
+		log.Fatalf("load controller state: %v", err)
+	}
+	a.controller = controller
 	router, err := a.router()
 	if err != nil {
 		log.Fatalf("configure router: %v", err)
 	}
 
-	go a.runRoomSync(ctx)
+	// Reconciliation used to start for every room during process startup. Lifecycle
+	// is now process-local and explicitly operator-controlled, so startup exposes
+	// persisted desired state while every room remains stopped.
+	defer a.controller.close()
+	defer a.state.closeAdmins()
 	server := &http.Server{
 		Addr:              ":8080",
 		Handler:           router,
@@ -137,17 +156,16 @@ func newApp(ctx context.Context, tokens map[string]string, adminPassword string,
 		ctx = context.Background()
 	}
 	a := &app{
-		ctx:              ctx,
-		state:            newState(),
-		tokenStore:       tokens,
-		meetingSchedule:  meetingSchedule{starts: make(map[string]time.Time)},
-		rozetaBaseURL:    "https://rozeta.app",
-		httpClient:       &http.Client{Timeout: 15 * time.Second},
-		adminPassword:    adminPassword,
-		sessionSecret:    sessionSecret,
-		loginLimiter:     newLoginLimiter(),
-		confirmationTime: commandConfirmationTime,
-		pollInterval:     commandPollInterval,
+		ctx:             ctx,
+		state:           newState(),
+		tokenStore:      tokens,
+		meetingSchedule: meetingSchedule{starts: make(map[string]time.Time)},
+		rozetaBaseURL:   "https://rozeta.app",
+		httpClient:      &http.Client{Timeout: 15 * time.Second},
+		adminPassword:   adminPassword,
+		sessionSecret:   sessionSecret,
+		loginLimiter:    newLoginLimiter(),
+		epoch:           newProcessEpoch(),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -161,12 +179,15 @@ func newApp(ctx context.Context, tokens map[string]string, adminPassword string,
 			},
 		},
 	}
-	roomNames := make([]string, 0, len(tokens))
-	for roomName := range tokens {
-		roomNames = append(roomNames, roomName)
-	}
-	a.state.seedRooms(roomNames)
 	return a
+}
+
+func newProcessEpoch() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err == nil {
+		return hex.EncodeToString(value[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 func (a *app) router() (*gin.Engine, error) {
@@ -190,7 +211,12 @@ func (a *app) router() (*gin.Engine, error) {
 	protected.POST("/api/logout", a.requireSameOrigin, a.handleLogout)
 	protected.GET("/api/rooms", a.handleListRooms)
 	protected.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
-	protected.POST("/api/rooms/:roomName/commands", a.requireSameOrigin, a.handleCommand)
+	protected.PUT("/api/rooms/:roomName/desired-state", a.requireSameOrigin, a.handleDesiredState)
+	protected.POST("/api/rooms/:roomName/reconciliation/:action/preflight", a.requireSameOrigin, a.handleRoomReconciliationPreflight)
+	protected.POST("/api/rooms/:roomName/observe", a.requireSameOrigin, a.handleObserveRoom)
+	protected.POST("/api/rooms/:roomName/reconciliation/:action", a.requireSameOrigin, a.handleRoomReconciliation)
+	protected.POST("/api/reconciliation/:action/preflight", a.requireSameOrigin, a.handleBulkReconciliationPreflight)
+	protected.POST("/api/reconciliation/:action", a.requireSameOrigin, a.handleBulkReconciliation)
 	protected.GET("/ws/admin", a.handleAdminWS)
 	return router, nil
 }
@@ -201,6 +227,7 @@ func (a *app) handleAsset(c *gin.Context) {
 		"login.js":    "text/javascript; charset=utf-8",
 		"styles.css":  "text/css; charset=utf-8",
 		"tooltips.js": "text/javascript; charset=utf-8",
+		"state.js":    "text/javascript; charset=utf-8",
 	}
 	name := c.Param("name")
 	contentType, ok := contentTypes[name]
@@ -226,7 +253,42 @@ func (a *app) handleIndex(c *gin.Context) {
 }
 
 func (a *app) handleListRooms(c *gin.Context) {
-	c.JSON(http.StatusOK, a.state.snapshotRooms())
+	if a.controller == nil {
+		c.JSON(http.StatusOK, roomsResponse{Epoch: a.epoch, Rooms: []roomView{}})
+		return
+	}
+	c.JSON(http.StatusOK, roomsResponse{Epoch: a.epoch, Rooms: a.controller.snapshotRooms()})
+}
+
+type roomsResponse struct {
+	Epoch string     `json:"epoch"`
+	Rooms []roomView `json:"rooms"`
+}
+
+type reconciliationResponse struct {
+	Epoch   string                 `json:"epoch"`
+	Rooms   []roomView             `json:"rooms"`
+	Results []reconciliationResult `json:"results,omitempty"`
+}
+
+type roomReconciliationRequest struct {
+	Epoch                     string          `json:"epoch"`
+	ExpectedReconciliationRun *uint64         `json:"expected_reconciliation_run"`
+	ExpectedGeneration        *uint64         `json:"expected_generation"`
+	Preflight                 *preflightFacts `json:"preflight,omitempty"`
+	Confirmed                 bool            `json:"confirmed"`
+}
+
+type bulkReconciliationRequest struct {
+	Epoch     string                 `json:"epoch"`
+	Rooms     []reconciliationTarget `json:"rooms"`
+	Confirmed bool                   `json:"confirmed"`
+}
+
+type preflightResponse struct {
+	Epoch   string            `json:"epoch"`
+	Rooms   []roomView        `json:"rooms"`
+	Results []preflightResult `json:"results"`
 }
 
 type roomMeetingView struct {
@@ -235,196 +297,212 @@ type roomMeetingView struct {
 	Status         string     `json:"status"`
 	Source         string     `json:"source_language,omitempty"`
 	Target         string     `json:"target_language,omitempty"`
-	StartedAt      time.Time  `json:"started_at,omitempty"`
-	PausedAt       time.Time  `json:"paused_at,omitempty"`
-	UpdatedAt      time.Time  `json:"updated_at,omitempty"`
+	StartedAt      time.Time  `json:"started_at,omitempty,omitzero"`
+	PausedAt       time.Time  `json:"paused_at,omitempty,omitzero"`
+	UpdatedAt      time.Time  `json:"updated_at,omitempty,omitzero"`
 	ScheduledStart *time.Time `json:"scheduled_start,omitempty"`
 }
 
 type roomMeetingsResponse struct {
+	Epoch           string            `json:"epoch"`
 	RoomName        string            `json:"room_name"`
 	ScheduleEnabled bool              `json:"schedule_enabled"`
+	Generation      uint64            `json:"generation"`
+	Revision        uint64            `json:"revision"`
+	UpdatedAt       time.Time         `json:"updated_at"`
 	Meetings        []roomMeetingView `json:"meetings"`
 }
 
 func (a *app) handleRoomMeetings(c *gin.Context) {
 	roomName := strings.TrimSpace(c.Param("roomName"))
-	token, ok := a.tokenStore[roomName]
-	if !ok {
+	room, meetings, err := a.controller.refreshRoomMeetings(c.Request.Context(), roomName)
+	if errors.Is(err, errUnknownRoom) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room"})
 		return
 	}
-	meetings, err := a.fetchRozetaMeetings(c.Request.Context(), token)
 	if err != nil {
-		a.markRoomAPIError(roomName, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to load Rozeta meetings"})
 		return
 	}
-	before, _ := a.state.snapshotRoom(roomName)
-	room, changed := a.state.applyMeetingSync(roomName, meetings)
-	if changed {
-		a.broadcastRoom(room)
-	}
-	a.broadcastLateConfirmation(before, room)
 	c.JSON(http.StatusOK, roomMeetingsResponse{
+		Epoch:           a.epoch,
 		RoomName:        roomName,
 		ScheduleEnabled: a.meetingSchedule.enabled,
+		Generation:      room.Generation,
+		Revision:        room.Revision,
+		UpdatedAt:       room.UpdatedAt,
 		Meetings:        a.meetingSchedule.prepareMeetings(meetings),
 	})
 }
 
-type commandRequest struct {
-	Action          string `json:"action"`
-	TargetMeetingID string `json:"target_meeting_id"`
+type desiredStateRequest struct {
+	MeetingID                 string  `json:"meeting_id"`
+	Epoch                     string  `json:"epoch"`
+	ExpectedReconciliationRun *uint64 `json:"expected_reconciliation_run"`
+	ExpectedGeneration        *uint64 `json:"expected_generation"`
+	ConfirmDestructiveResume  bool    `json:"confirm_destructive_resume"`
+	Rearm                     bool    `json:"rearm"`
 }
 
-func (a *app) handleCommand(c *gin.Context) {
+func (a *app) handleDesiredState(c *gin.Context) {
 	roomName := strings.TrimSpace(c.Param("roomName"))
-	if _, ok := a.tokenStore[roomName]; !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room"})
-		return
-	}
-	var request commandRequest
+	var request desiredStateRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid command request"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid desired state request"})
 		return
 	}
-	request.Action = strings.TrimSpace(request.Action)
-	request.TargetMeetingID = strings.TrimSpace(request.TargetMeetingID)
-	expectedStatus, ok := expectedCommandStatus(request.Action)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported action"})
+	if strings.TrimSpace(request.Epoch) == "" || request.ExpectedReconciliationRun == nil || request.ExpectedGeneration == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "epoch, expected_reconciliation_run, and expected_generation are required"})
 		return
 	}
-	if (request.Action == "goto" || request.Action == "resume") && request.TargetMeetingID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "target meeting is required"})
+	room, err := a.controller.updateDesired(roomName, desiredStateUpdate{
+		MeetingID: request.MeetingID, ExpectedEpoch: request.Epoch,
+		ExpectedRun: *request.ExpectedReconciliationRun, ExpectedGeneration: *request.ExpectedGeneration,
+		ConfirmDestructiveResume: request.ConfirmDestructiveResume, Rearm: request.Rearm,
+	})
+	if errors.Is(err, errGenerationConflict) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "room": room})
 		return
 	}
-	if request.Action == "resume" {
-		// Resume permanently deletes transcript data. The UI confirmation is not an
-		// authorization boundary, so the server rechecks the selected meeting state
-		// before allowing the destructive endpoint call.
-		meeting, err := a.fetchRozetaMeeting(c.Request.Context(), a.tokenStore[roomName], request.TargetMeetingID)
-		if err != nil {
-			a.markRoomAPIError(roomName, err)
-			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to verify completed meeting"})
-			return
-		}
-		if meeting.Status != "completed" {
-			c.JSON(http.StatusConflict, gin.H{"error": "only completed meetings can be resumed"})
-			return
-		}
-	}
-
-	cmd, room, err := a.state.beginCommand(roomName, request.Action, request.TargetMeetingID, expectedStatus)
 	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, errUnknownRoom):
+			status = http.StatusNotFound
+		case errors.Is(err, errMeetingIDRequired):
+			status = http.StatusBadRequest
+		case errors.Is(err, errInvalidReconciliation):
+			status = http.StatusBadRequest
+		case errors.Is(err, errGenerationExhausted):
+			status = http.StatusConflict
+		case errors.Is(err, errReconciliationNotActive):
+			status = http.StatusConflict
+		case errors.Is(err, errDestructiveConfirmation):
+			status = http.StatusUnprocessableEntity
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, room)
+}
+
+func (a *app) handleObserveRoom(c *gin.Context) {
+	roomName := strings.TrimSpace(c.Param("roomName"))
+	var request roomReconciliationRequest
+	if err := c.ShouldBindJSON(&request); err != nil || request.ExpectedReconciliationRun == nil || request.ExpectedGeneration == nil || request.Epoch == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "epoch, expected_reconciliation_run, and expected_generation are required"})
+		return
+	}
+	if err := a.controller.requestObservation(request.Epoch, roomName, *request.ExpectedReconciliationRun, *request.ExpectedGeneration); err != nil {
 		status := http.StatusConflict
-		if err.Error() == "unknown room" {
+		if errors.Is(err, errUnknownRoom) {
 			status = http.StatusNotFound
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	a.broadcastRoom(room)
-	go a.executeCommand(cmd)
-	c.JSON(http.StatusAccepted, gin.H{
-		"command_id": cmd.CommandID,
-		"room_name":  cmd.RoomName,
-		"action":     cmd.Action,
-		"status":     "pending",
-	})
+	c.Status(http.StatusAccepted)
 }
 
-func expectedCommandStatus(action string) (string, bool) {
-	switch action {
-	case "goto":
-		return "", true
-	case "start":
-		return "in_progress", true
-	case "pause":
-		return "paused", true
-	case "resume":
-		return "ready", true
-	default:
-		return "", false
-	}
+func (a *app) handleRoomReconciliationPreflight(c *gin.Context) {
+	a.handleReconciliationPreflight(c, true)
 }
 
-func (a *app) executeCommand(cmd command) {
-	token := a.tokenStore[cmd.RoomName]
-	timeout := a.confirmationTime
-	if timeout <= 0 {
-		timeout = commandConfirmationTime
-	}
-	ctx, cancel := context.WithTimeout(a.ctx, timeout)
-	defer cancel()
-
-	var sendErr error
-	switch cmd.Action {
-	case "goto":
-		sendErr = a.sendRozetaCommand(ctx, token, "goto_meeting", cmd.TargetMeetingID)
-		if sendErr != nil {
-			a.completeCommand(cmd, "failed", "", sendErr.Error())
-			return
-		}
-		a.completeCommand(cmd, "confirmed", "", "")
-		return
-	case "start":
-		sendErr = a.sendRozetaCommand(ctx, token, "start_meeting", cmd.TargetMeetingID)
-	case "pause":
-		sendErr = a.sendRozetaCommand(ctx, token, "pause_meeting", cmd.TargetMeetingID)
-	case "resume":
-		sendErr = a.resumeRozetaMeeting(ctx, token, cmd.TargetMeetingID)
-	}
-
-	interval := a.pollInterval
-	if interval <= 0 {
-		interval = commandPollInterval
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		meeting, err := a.fetchRozetaMeeting(ctx, token, cmd.TargetMeetingID)
-		if err == nil && meeting.Status == expectedStatusForCommand(cmd.Action) {
-			a.completeCommand(cmd, "confirmed", meeting.Status, "")
-			return
-		}
-		a.markRoomAPIError(cmd.RoomName, err)
-		select {
-		case <-ctx.Done():
-			message := "command confirmation timed out"
-			if sendErr != nil {
-				message += ": " + sendErr.Error()
-			}
-			a.completeCommand(cmd, "confirmation_timeout", "", message)
-			return
-		case <-ticker.C:
-		}
-	}
+func (a *app) handleBulkReconciliationPreflight(c *gin.Context) {
+	a.handleReconciliationPreflight(c, false)
 }
 
-func expectedStatusForCommand(action string) string {
-	status, _ := expectedCommandStatus(action)
-	return status
-}
-
-func (a *app) completeCommand(cmd command, result, status, message string) {
-	room, ok := a.state.finishCommand(cmd.RoomName, cmd.CommandID, result, status, message)
-	if !ok {
+func (a *app) handleReconciliationPreflight(c *gin.Context, single bool) {
+	action := c.Param("action")
+	if action != "start" && action != "stop" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown preflight action"})
 		return
 	}
-	a.broadcastRoom(room)
-	level := "info"
-	if result == "failed" || result == "confirmation_timeout" {
-		level = "error"
+	var epoch string
+	var targets []reconciliationTarget
+	if single {
+		var request roomReconciliationRequest
+		if err := c.ShouldBindJSON(&request); err != nil || request.ExpectedReconciliationRun == nil || request.ExpectedGeneration == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "epoch, expected_reconciliation_run, and expected_generation are required"})
+			return
+		}
+		epoch = request.Epoch
+		targets = []reconciliationTarget{{RoomName: strings.TrimSpace(c.Param("roomName")), ExpectedReconciliationRun: *request.ExpectedReconciliationRun, ExpectedGeneration: *request.ExpectedGeneration}}
+	} else {
+		var request bulkReconciliationRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid preflight request"})
+			return
+		}
+		epoch, targets = request.Epoch, request.Rooms
 	}
-	a.broadcastToAdmins(adminEnvelope{
-		Type:      "alert",
-		Level:     level,
-		Message:   fmt.Sprintf("%s %s for %s", cmd.Action, result, cmd.RoomName),
-		Room:      room,
-		Timestamp: time.Now().UTC(),
-	})
+	rooms, results, err := a.controller.lifecyclePreflight(c.Request.Context(), epoch, action, targets)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "epoch": a.epoch, "rooms": rooms})
+		return
+	}
+	c.JSON(http.StatusOK, preflightResponse{Epoch: a.epoch, Rooms: rooms, Results: results})
+}
+
+func (a *app) handleRoomReconciliation(c *gin.Context) {
+	action := c.Param("action")
+	if !validReconciliationAction(action) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown reconciliation action"})
+		return
+	}
+	var request roomReconciliationRequest
+	if err := c.ShouldBindJSON(&request); err != nil || request.ExpectedReconciliationRun == nil || request.ExpectedGeneration == nil || request.Epoch == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "epoch, expected_reconciliation_run, and expected_generation are required"})
+		return
+	}
+	roomName := strings.TrimSpace(c.Param("roomName"))
+	rooms, results, err := a.controller.confirmedLifecycle(c.Request.Context(), request.Epoch, action, []reconciliationTarget{{
+		RoomName: roomName, ExpectedReconciliationRun: *request.ExpectedReconciliationRun, ExpectedGeneration: *request.ExpectedGeneration,
+		Preflight: request.Preflight,
+	}}, request.Confirmed)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, errInvalidReconciliation) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error(), "epoch": a.epoch, "rooms": rooms})
+		return
+	}
+	c.JSON(http.StatusAccepted, reconciliationResponse{Epoch: a.epoch, Rooms: rooms, Results: results})
+}
+
+func (a *app) handleBulkReconciliation(c *gin.Context) {
+	action := c.Param("action")
+	if !validReconciliationAction(action) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown reconciliation action"})
+		return
+	}
+	var request bulkReconciliationRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid reconciliation request"})
+		return
+	}
+	if strings.TrimSpace(request.Epoch) == "" || len(request.Rooms) == 0 {
+		// A syntactically valid but incomplete bulk request previously had no
+		// authoritative recovery payload. Treat it as an optimistic conflict so the
+		// browser replaces its entire room set before another confirmation attempt.
+		c.JSON(http.StatusConflict, gin.H{"error": errReconciliationConflict.Error(), "epoch": a.epoch, "rooms": a.controller.snapshotRooms()})
+		return
+	}
+	rooms, results, err := a.controller.confirmedLifecycle(c.Request.Context(), request.Epoch, action, request.Rooms, request.Confirmed)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, errInvalidReconciliation) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error(), "epoch": a.epoch, "rooms": rooms})
+		return
+	}
+	c.JSON(http.StatusAccepted, reconciliationResponse{Epoch: a.epoch, Rooms: rooms, Results: results})
+}
+
+func validReconciliationAction(action string) bool {
+	return action == "start" || action == "stop" || action == "force-stop"
 }
 
 func (a *app) handleAdminWS(c *gin.Context) {
@@ -443,100 +521,16 @@ func (a *app) handleAdminWS(c *gin.Context) {
 	client := newAdminClient(conn)
 	a.state.registerAdmin(client)
 	go client.writePump()
-	client.sendJSON(adminEnvelope{Type: "snapshot", Rooms: a.state.snapshotRooms(), Timestamp: time.Now().UTC()})
+	rooms := []roomView{}
+	if a.controller != nil {
+		rooms = a.controller.snapshotRooms()
+	}
+	client.sendJSON(adminEnvelope{Type: "snapshot", Epoch: a.epoch, Rooms: rooms, Timestamp: time.Now().UTC()})
 	client.readPump(a)
 }
 
-func (a *app) runRoomSync(ctx context.Context) {
-	a.syncAllRooms(ctx)
-	ticker := time.NewTicker(roomSyncInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			a.syncAllRooms(ctx)
-		}
-	}
-}
-
-func (a *app) syncAllRooms(ctx context.Context) {
-	cycleCtx, cancel := context.WithTimeout(ctx, roomSyncCycleTimeout)
-	defer cancel()
-	rooms := a.state.snapshotRooms()
-	semaphore := make(chan struct{}, roomSyncConcurrency)
-	var workers sync.WaitGroup
-	for _, room := range rooms {
-		roomName := room.RoomName
-		workers.Go(func() {
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-			case <-cycleCtx.Done():
-				return
-			}
-			roomCtx, cancel := context.WithTimeout(cycleCtx, roomSyncRequestTimeout)
-			defer cancel()
-			a.syncRoom(roomCtx, roomName)
-		})
-	}
-	workers.Wait()
-}
-
-func (a *app) syncRoom(ctx context.Context, roomName string) {
-	token := a.tokenStore[roomName]
-	meetings, err := a.fetchRozetaMeetings(ctx, token)
-	if err != nil {
-		apiStatus := "stale"
-		var apiErr *rozetaAPIError
-		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
-			apiStatus = "authentication_error"
-		}
-		room, changed := a.state.markSyncError(roomName, apiStatus, err.Error())
-		if changed {
-			a.broadcastRoom(room)
-		}
-		return
-	}
-	before, _ := a.state.snapshotRoom(roomName)
-	room, changed := a.state.applyMeetingSync(roomName, meetings)
-	if changed {
-		a.broadcastRoom(room)
-	}
-	a.broadcastLateConfirmation(before, room)
-}
-
-func (a *app) markRoomAPIError(roomName string, err error) {
-	if err == nil {
-		return
-	}
-	apiStatus := "stale"
-	var apiErr *rozetaAPIError
-	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
-		apiStatus = "authentication_error"
-	}
-	room, changed := a.state.markSyncError(roomName, apiStatus, err.Error())
-	if changed {
-		a.broadcastRoom(room)
-	}
-}
-
-func (a *app) broadcastLateConfirmation(before, after roomView) {
-	if before.LastCommandResult == "confirmed_late" || after.LastCommandResult != "confirmed_late" {
-		return
-	}
-	a.broadcastToAdmins(adminEnvelope{
-		Type:      "alert",
-		Level:     "info",
-		Message:   fmt.Sprintf("%s confirmed late for %s", after.LastCommandAction, after.RoomName),
-		Room:      after,
-		Timestamp: time.Now().UTC(),
-	})
-}
-
 func (a *app) broadcastRoom(room roomView) {
-	a.broadcastToAdmins(adminEnvelope{Type: "room_snapshot", Room: room, Timestamp: time.Now().UTC()})
+	a.broadcastToAdmins(adminEnvelope{Type: "room_snapshot", Epoch: a.epoch, Room: &room, Timestamp: time.Now().UTC()})
 }
 
 func (a *app) broadcastToAdmins(message adminEnvelope) {
@@ -563,6 +557,11 @@ func loadRoomTokens(path string) (map[string]string, error) {
 	}
 
 	tokens := make(map[string]string, len(records)-1)
+	// The previous loader only rejected duplicate room labels, allowing one account
+	// identity or bearer token to be controlled by multiple room actors. Track both
+	// ownership keys so every configured account remains exclusive.
+	ownersByToken := make(map[string]string, len(records)-1)
+	accountsByUserID := make(map[string]string, len(records)-1)
 	for index, record := range records[1:] {
 		line := index + 2
 		if len(record) != 3 {
@@ -585,7 +584,15 @@ func loadRoomTokens(path string) (map[string]string, error) {
 		if _, duplicate := tokens[roomName]; duplicate {
 			return nil, fmt.Errorf("token CSV line %d duplicates room %q", line, roomName)
 		}
+		if owner, duplicate := ownersByToken[token]; duplicate {
+			return nil, fmt.Errorf("token CSV line %d reuses token owned by room %q", line, owner)
+		}
+		if owner, duplicate := accountsByUserID[userID]; duplicate {
+			return nil, fmt.Errorf("token CSV line %d reuses user ID owned by room %q", line, owner)
+		}
 		tokens[roomName] = token
+		ownersByToken[token] = roomName
+		accountsByUserID[userID] = roomName
 	}
 	if len(tokens) == 0 {
 		return nil, errors.New("token CSV contains no rooms")
@@ -602,36 +609,36 @@ func isTokenHeader(record []string) bool {
 }
 
 type adminEnvelope struct {
-	Type      string     `json:"type"`
-	Level     string     `json:"level,omitempty"`
-	Message   string     `json:"message,omitempty"`
-	Room      roomView   `json:"room,omitempty"`
+	Type    string `json:"type"`
+	Epoch   string `json:"epoch,omitempty"`
+	Level   string `json:"level,omitempty"`
+	Message string `json:"message,omitempty"`
+	// A value struct is never empty to encoding/json, so snapshot envelopes used to
+	// include a fabricated zero-value room. A pointer now makes room exclusive to
+	// room_snapshot while full snapshots carry only the authoritative rooms array.
+	Room      *roomView  `json:"room,omitempty"`
 	Rooms     []roomView `json:"rooms,omitempty"`
 	Timestamp time.Time  `json:"timestamp,omitempty"`
 }
 
-type command struct {
-	CommandID       string
-	RoomName        string
-	Action          string
-	TargetMeetingID string
-	Revision        int
-	IssuedAt        time.Time
-}
-
 type roomView struct {
-	RoomName             string    `json:"room_name"`
-	Status               string    `json:"status"`
-	APIStatus            string    `json:"api_status"`
-	CurrentMeetingID     string    `json:"current_meeting_id,omitempty"`
-	CurrentMeetingName   string    `json:"current_meeting_name,omitempty"`
-	LastSyncedAt         time.Time `json:"last_synced_at,omitempty"`
-	LastCommandID        string    `json:"last_command_id,omitempty"`
-	LastCommandAction    string    `json:"last_command_action,omitempty"`
-	LastCommandResult    string    `json:"last_command_result,omitempty"`
-	LastError            string    `json:"last_error,omitempty"`
-	PendingCommandID     string    `json:"pending_command_id,omitempty"`
-	PendingCommandAction string    `json:"pending_command_action,omitempty"`
-	PendingCommandTarget string    `json:"pending_command_target,omitempty"`
-	UpdatedAt            time.Time `json:"updated_at,omitempty"`
+	Epoch             string               `json:"epoch"`
+	RoomName          string               `json:"room_name"`
+	DesiredMeetingID  string               `json:"desired_meeting_id,omitempty"`
+	Generation        uint64               `json:"generation"`
+	ResumeConsumed    bool                 `json:"resume_consumed"`
+	Revision          uint64               `json:"revision"`
+	DesiredStatus     string               `json:"desired_status,omitempty"`
+	Lifecycle         string               `json:"lifecycle"`
+	ReconciliationRun uint64               `json:"reconciliation_run"`
+	ActiveMeetingIDs  []string             `json:"active_meeting_ids"`
+	ActiveObservedAt  time.Time            `json:"active_observed_at,omitempty,omitzero"`
+	ActiveSetStale    bool                 `json:"active_set_stale"`
+	Summary           string               `json:"summary"`
+	SummaryReason     string               `json:"summary_reason"`
+	Conditions        []reconcileCondition `json:"conditions"`
+	RecentActions     []recentAction       `json:"recent_actions"`
+	LastError         string               `json:"last_error,omitempty"`
+	Meetings          []roomMeetingView    `json:"meetings"`
+	UpdatedAt         time.Time            `json:"updated_at,omitempty,omitzero"`
 }

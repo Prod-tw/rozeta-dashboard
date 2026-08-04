@@ -25,7 +25,12 @@ services:
         source: ${SESSION_FILE:-./session.csv}
         target: /data/session.csv
         read_only: true
-    command: ['-account', '/data/account.csv', '-session', '/data/session.csv']
+      # The desired state is the controller's source of truth across restarts.
+      # CSV credentials remain read-only while this dedicated named volume is writable.
+      - type: volume
+        source: controller-state
+        target: /var/lib/rozeta-dashboard
+    command: ['-account', '/data/account.csv', '-session', '/data/session.csv', '-state', '/var/lib/rozeta-dashboard/controller-state.json']
     # The application does not write locally or need Linux capabilities. These limits
     # replace Docker's broader defaults without changing network access to Rozeta.
     read_only: true
@@ -35,3 +40,6 @@ services:
       - no-new-privileges=true
     pids_limit: 100
     stop_grace_period: 15s
+
+volumes:
+  controller-state:

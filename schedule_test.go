@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -129,6 +130,26 @@ func TestFetchOPASSScheduleStopsAfterConfiguredAttempts(t *testing.T) {
 	}
 	if attempts.Load() != 3 {
 		t.Fatalf("attempts = %d, want 3", attempts.Load())
+	}
+}
+
+func TestScheduleLoadDistinguishesRemoteFailureFromLocalConfiguration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	_, _, err := loadMeetingScheduleWithOptions(
+		context.Background(),
+		writeSessionCSV(t, "議程 ID,Session ID\nmeeting-a,SESSION-A\n"),
+		scheduleLoadOptions{url: server.URL, client: server.Client()},
+	)
+	var remoteErr *scheduleRemoteError
+	if !errors.As(err, &remoteErr) {
+		t.Fatalf("remote schedule error = %v, want scheduleRemoteError", err)
+	}
+	_, _, err = loadMeetingScheduleWithOptions(context.Background(), filepath.Join(t.TempDir(), "missing.csv"), scheduleLoadOptions{})
+	if errors.As(err, &remoteErr) {
+		t.Fatalf("local schedule error = %v, must not be scheduleRemoteError", err)
 	}
 }
 

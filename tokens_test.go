@@ -54,6 +54,8 @@ func TestLoadRoomTokensRejectsInvalidConfiguration(t *testing.T) {
 		{name: "short row", content: "account,User ID,Token\nroom,user\n", wantError: "line 2"},
 		{name: "extra field", content: "account,User ID,Token\nroom,user,token,extra\n", wantError: "line 2"},
 		{name: "duplicate room", content: "account,User ID,Token\nroom@coscup.org,user,one\nroom@coscup.org,user,two\n", wantError: "duplicates room"},
+		{name: "duplicate token ownership", content: "account,User ID,Token\nroom-a,user-a,same\nroom-b,user-b,same\n", wantError: "reuses token"},
+		{name: "duplicate account ownership", content: "account,User ID,Token\nroom-a,user-a,one\nroom-b,user-a,two\n", wantError: "reuses user ID"},
 	}
 
 	for _, test := range tests {

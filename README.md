@@ -1,58 +1,46 @@
-# Rozeta Remote Management
+# Rozeta Declarative Controller
 
-Authenticated control panel for managing multiple Rozeta room accounts through the Rozeta meeting and command APIs.
+Authenticated control plane that lets administrators reconcile each Rozeta room account to one persisted desired meeting. While a room is active, the controller maintains the invariant that the desired meeting is the account's only meeting with `status=in_progress`.
 
 ## How to Run
 
-Use Go 1.25 and provide the admin credentials plus the required room token CSV. Pass the optional session CSV to order each room's meetings by the COSCUP timetable:
+Use Go 1.25 and provide the required account CSV. The optional session CSV recommends and orders meetings but never automatically selects desired state.
 
 ```sh
 export ADMIN_PASSWORD='replace-with-a-strong-password'
 export SESSION_SECRET='replace-with-at-least-32-random-bytes'
-go run . -account account.csv -session session.csv
+go run . -account account.csv -session session.csv -state controller-state.json
 ```
 
-Open `http://localhost:8080` directly for development, or the configured HTTPS deployment URL in production. The secure session cookie requires HTTPS in production.
+The account CSV starts with `account,User ID,Token` or `帳號,User ID,Token`. Configure OBS with Rozeta's authenticated embed URL, including `client=obs`; when navigation is needed, the controller sends normal `goto_meeting` followed by OBS-targeted `goto_meeting_embed`.
 
-The CSV must start with either `account,User ID,Token` or `帳號,User ID,Token`. Room names are derived by removing `@coscup.org` from the account field.
+The versioned state file is authoritative and must be retained across restarts. Desired state contains the meeting ID, generation, and persisted automatic-Resume consumption record; lifecycle and run intent are process-local. An existing version 1 state file is atomically migrated to version 2 by preserving meeting IDs and generations and dropping `running`. Migration never starts reconciliation or sends a Rozeta command. A malformed or unsupported state file stops startup.
 
-When `-session` is present, the file must contain `議程 ID` and `Session ID` columns. At startup the service downloads `https://coscup.org/2026/api/opass.json`, joins the Rozeta meeting ID to the opass session ID, and sorts meetings from earliest to latest. Missing mappings appear last as `未排程`; malformed mapping rows are logged. Without `-session`, meetings are sorted by title and no timetable is shown.
+Every process start leaves every room `suspended / ActiveSetUnknown`. Session data may recommend an initial meeting, but a room without persisted desired state remains `InitialMeetingRequired` until an administrator chooses one. Administrators explicitly start, stop, or force-stop rooms individually or through browser-captured bulk controls; every lifecycle action requires confirmation.
 
-Use Goto before Start or Pause when no unique active meeting can be resolved. Start and Pause wait up to 15 seconds for Rozeta to report the expected meeting status. Resume permanently deletes the selected completed meeting's transcriptions and translations before resetting it to ready.
+Start performs a remote preflight before activating a room. While active, the controller observes the complete paginated `status=in_progress` set every five seconds. It starts the desired meeting before pausing old active meetings, preserving availability while eventually converging to exactly `{desired}`. A completed desired meeting may be automatically Resumed at most once per generation; consumption is persisted before dispatch so a crash or timeout cannot repeat the destructive operation. Start and completed-meeting confirmations must warn that Resume permanently deletes completed transcripts and translations.
 
-Run tests with:
+Normal Stop targets an empty active set. Its preflight lists the currently active meetings, then stopping repeatedly observes and Pauses every `in_progress` meeting until a fresh observation is empty. Force-stop is available immediately, runs automatically after 30 seconds, cancels local old-run work, and leaves remote outcome unknown because Rozeta may still apply an already accepted command.
+
+Run the tests with:
 
 ```sh
 go test ./...
+go test -race -shuffle=on ./...
+pnpm test
 ```
 
 ## Container
 
-Build and run the container with both CSV files mounted read-only. Credentials remain runtime environment variables and are not stored in the image:
+`compose.yaml` mounts account/session CSV files read-only and stores controller state in the `controller-state` named volume:
 
 ```sh
-docker build -t image.prod.tw/rozeta-dashboard:latest .
-docker run --rm -p 8080:8080 \
-  -e ADMIN_PASSWORD \
-  -e SESSION_SECRET \
-  --mount type=bind,src="$(pwd)/account.csv",dst=/data/account.csv,readonly \
-  --mount type=bind,src="$(pwd)/session.csv",dst=/data/session.csv,readonly \
-  image.prod.tw/rozeta-dashboard:latest \
-  -account /data/account.csv -session /data/session.csv
-```
-
-`.github/workflows/container.yml` tests every pull request and builds the image without publishing it. Pushes to `main`, version tags matching `v*`, and manual workflow runs publish `image.prod.tw/rozeta-dashboard` for `linux/amd64` and `linux/arm64`. Configure the registry password as the GitHub Actions repository secret `REGISTRY_PASSWORD`; the workflow injects it only into `docker/login-action` and logs in as `prod`.
-
-To run the published image with Compose, log in to the registry once and inject the required application credentials from the shell:
-
-```sh
-printf '%s' "$REGISTRY_PASSWORD" | docker login image.prod.tw --username prod --password-stdin
 export ADMIN_PASSWORD='replace-with-a-strong-password'
 export SESSION_SECRET='replace-with-at-least-32-random-bytes'
 docker compose up -d
 ```
 
-`compose.yaml` mounts `./account.csv` and `./session.csv` read-only and exposes port `8080`. Override these defaults with `ACCOUNT_FILE`, `SESSION_FILE`, `HTTP_PORT`, or `IMAGE` as needed. Use `docker compose logs -f dashboard` to inspect startup and `docker compose down` to stop the service.
+Use `docker compose down` to retain desired state, or `docker compose down -v` to remove it deliberately.
 
 ## License
 

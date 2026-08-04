@@ -25,6 +25,10 @@ FROM scratch
 # builder's CA bundle. It now runs as an unprivileged numeric user instead of root.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/rozeta-dashboard /rozeta-dashboard
+# The controller's desired state survives container replacement. Creating this
+# mount point with the runtime UID lets Docker initialise a named volume writable
+# by the unprivileged process while the rest of the filesystem stays read-only.
+COPY --chown=65532:65532 --from=build /tmp /var/lib/rozeta-dashboard
 
 USER 65532:65532
 
@@ -33,4 +37,4 @@ EXPOSE 8080
 # Account credentials were previously read directly from the checkout. They remain
 # runtime-only data and are now mounted as /data/account.csv instead of entering the image.
 ENTRYPOINT ["/rozeta-dashboard"]
-CMD ["-account", "/data/account.csv"]
+CMD ["-account", "/data/account.csv", "-state", "/var/lib/rozeta-dashboard/controller-state.json"]
