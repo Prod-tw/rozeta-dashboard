@@ -176,6 +176,9 @@ func TestLoadMeetingScheduleIgnoresSessionMappingsMissingFromOPASS(t *testing.T)
 	if len(schedule.starts) != 1 {
 		t.Fatalf("schedule starts = %#v, want only the matched mapping", schedule.starts)
 	}
+	if schedule.opassIDs["invalid-meeting"] != "INVALID" {
+		t.Fatalf("schedule opass IDs = %#v, want invalid-meeting mapping", schedule.opassIDs)
+	}
 }
 
 func TestLoadMeetingScheduleRejectsInvalidMappedStart(t *testing.T) {

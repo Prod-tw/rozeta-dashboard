@@ -183,6 +183,90 @@ func TestDesiredStateFileV2AndAtomicV1Migration(t *testing.T) {
 	})
 }
 
+func TestSelectCurrentMeeting(t *testing.T) {
+	opassIDs := map[string]string{"meeting-a": "OPASS-A", "meeting-b": "OPASS-B"}
+	active := []roomMeetingView{
+		{ID: "meeting-a", Title: "A"},
+		{ID: "meeting-b", Title: "B"},
+	}
+
+	tests := []struct {
+		name    string
+		active  []roomMeetingView
+		desired string
+		want    *currentMeetingResponse
+	}{
+		{name: "empty", active: nil},
+		{name: "single", active: active[:1], want: &currentMeetingResponse{Name: "A", OPASSID: "OPASS-A"}},
+		{name: "multiple selects desired", active: active, desired: "meeting-b", want: &currentMeetingResponse{Name: "B", OPASSID: "OPASS-B"}},
+		{name: "multiple without desired", active: active, desired: "meeting-c"},
+		{name: "missing opass mapping", active: []roomMeetingView{{ID: "meeting-c", Title: "C"}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := selectCurrentMeeting(test.active, test.desired, opassIDs); !equalCurrentMeeting(got, test.want) {
+				t.Fatalf("selectCurrentMeeting() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func equalCurrentMeeting(left, right *currentMeetingResponse) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+func TestCurrentMeetingEndpointIsPublic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("status") != "in_progress" {
+			t.Errorf("status query = %q, want in_progress", request.URL.Query().Get("status"))
+		}
+		writeJSON(t, writer, map[string]any{
+			"data":  []map[string]any{meetingPayload("meeting-a", "in_progress", 0)},
+			"links": map[string]any{"next": nil},
+		})
+	}))
+	defer server.Close()
+
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	a.rozetaBaseURL = server.URL
+	schedule := meetingSchedule{
+		enabled:  true,
+		starts:   map[string]time.Time{"meeting-a": time.Now().UTC()},
+		opassIDs: map[string]string{"meeting-a": "OPASS-A"},
+		snapshots: map[string][]roomMeetingView{
+			"room-a": {{ID: "meeting-a", Title: "meeting-a"}},
+		},
+	}
+	c, err := newController(context.Background(), a, a.tokenStore, schedule, filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+	a.controller = c
+	updateTestDesired(t, c, "room-a", "meeting-a")
+
+	router, err := a.router()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/rooms/room-a/in-progress", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var got currentMeetingResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != (currentMeetingResponse{Name: "meeting-a", OPASSID: "OPASS-A"}) {
+		t.Fatalf("response = %#v", got)
+	}
+}
+
 func TestFetchRozetaMeetingsUsesFilteredPagination(t *testing.T) {
 	var server *httptest.Server
 	var queries []string

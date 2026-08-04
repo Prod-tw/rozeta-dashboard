@@ -212,6 +212,7 @@ func (a *app) router() (*gin.Engine, error) {
 	protected.GET("/", a.handleIndex)
 	protected.GET("/debug", a.handleDebug)
 	protected.POST("/api/logout", a.requireSameOrigin, a.handleLogout)
+	router.GET("/api/v1/rooms/:roomName/in-progress", a.handleCurrentMeeting)
 	router.POST("/api/v1/rooms/:roomName/actions/advance-and-start", a.requireExternalAPI, a.handleAdvanceAndStart)
 	protected.GET("/api/rooms", a.handleListRooms)
 	protected.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
@@ -326,6 +327,29 @@ type advanceAndStartResponse struct {
 	Generation uint64 `json:"generation"`
 	Lifecycle  string `json:"lifecycle"`
 	Status     string `json:"status"`
+}
+
+type currentMeetingResponse struct {
+	Name    string `json:"name"`
+	OPASSID string `json:"opass_id"`
+}
+
+func (a *app) handleCurrentMeeting(c *gin.Context) {
+	roomName := strings.TrimSpace(c.Param("roomName"))
+	if a.controller == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "controller unavailable"})
+		return
+	}
+	meeting, err := a.controller.currentMeeting(c.Request.Context(), roomName)
+	if errors.Is(err, errUnknownRoom) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to load current meeting"})
+		return
+	}
+	c.JSON(http.StatusOK, meeting)
 }
 
 func (a *app) handleAdvanceAndStart(c *gin.Context) {

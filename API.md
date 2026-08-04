@@ -1,5 +1,49 @@
 # External API
 
+## 查詢目前進行中的議程
+
+查詢指定 room 目前可確認的議程。此 endpoint 不需要 session 或 API token。
+
+```http
+GET /api/v1/rooms/{room_name}/in-progress
+```
+
+controller 會查詢 Rozeta 完整分頁的 `status=in_progress` 結果：
+
+- 沒有進行中的議程時回傳 `null`。
+- 只有一個進行中的議程時回傳該議程。
+- 有多個進行中的議程時，只在 controller 的 desired meeting 也正在進行時回傳它。
+- 有多個進行中的議程但 desired meeting 不在其中時回傳 `null`，不依 Rozeta 回傳順序猜測。
+
+### 成功回應
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+```json
+{
+	"name": "開源社群治理",
+	"opass_id": "opass-session-123"
+}
+```
+
+沒有可確認的議程時：
+
+```json
+null
+```
+
+`name` 是 Rozeta meeting 的 `title`；`opass_id` 是 `session.csv` 的 `Session ID`，不是 Rozeta meeting ID。只有通過啟動時 OPASS、session CSV 與 Rozeta 交集驗證的議程才會被回傳。
+
+### 錯誤回應
+
+| HTTP | 情況 |
+| --- | --- |
+| `404` | room 不存在 |
+| `502` | 無法從 Rozeta 取得完整的進行中議程 |
+
 ## 切換至下一場並啟動 reconciliation
 
 讓外部系統透過單一明確確認，要求指定 room 將排程中的下一個 meeting 設為 desired meeting，並在需要時啟動 reconciliation。

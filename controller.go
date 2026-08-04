@@ -1355,6 +1355,66 @@ func (c *controller) listActiveMeetings(ctx context.Context, room *controllerRoo
 	})
 }
 
+func (c *controller) currentMeeting(ctx context.Context, roomName string) (*currentMeetingResponse, error) {
+	c.mu.RLock()
+	room, found := c.rooms[roomName]
+	if !found {
+		c.mu.RUnlock()
+		return nil, errUnknownRoom
+	}
+	desiredMeetingID := room.desired.MeetingID
+	c.mu.RUnlock()
+
+	active, err := c.listActiveMeetings(ctx, room)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot, found := c.schedule.snapshots[roomName]; found {
+		known := make(map[string]struct{}, len(snapshot))
+		for _, meeting := range snapshot {
+			known[meeting.ID] = struct{}{}
+		}
+		filtered := active[:0]
+		for _, meeting := range active {
+			if _, exists := known[meeting.ID]; exists {
+				filtered = append(filtered, meeting)
+			}
+		}
+		active = filtered
+	}
+	return selectCurrentMeeting(active, desiredMeetingID, c.schedule.opassIDs), nil
+}
+
+func selectCurrentMeeting(active []roomMeetingView, desiredMeetingID string, opassIDs map[string]string) *currentMeetingResponse {
+	if len(active) == 0 {
+		return nil
+	}
+
+	selected := roomMeetingView{}
+	if len(active) == 1 {
+		selected = active[0]
+	} else {
+		// Multiple remote meetings are a degraded state. Only expose the controller's
+		// desired meeting when it is among them; guessing from response order could
+		// report an old meeting during a transition.
+		for _, meeting := range active {
+			if meeting.ID == desiredMeetingID {
+				selected = meeting
+				break
+			}
+		}
+		if selected.ID == "" {
+			return nil
+		}
+	}
+
+	opassID := strings.TrimSpace(opassIDs[selected.ID])
+	if opassID == "" {
+		return nil
+	}
+	return &currentMeetingResponse{Name: selected.Title, OPASSID: opassID}
+}
+
 func (c *controller) getMeeting(ctx context.Context, room *controllerRoom, meetingID string) (roomMeetingView, error) {
 	return runScheduled(ctx, c.scheduler, observationRequest, func(requestCtx context.Context) (roomMeetingView, error) {
 		return c.app.fetchRozetaMeeting(requestCtx, room.token, meetingID)

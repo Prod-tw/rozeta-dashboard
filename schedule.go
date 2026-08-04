@@ -17,8 +17,10 @@ import (
 const opassScheduleURL = "https://coscup.org/2026/api/opass.json"
 
 type meetingSchedule struct {
-	enabled   bool
-	starts    map[string]time.Time
+	enabled  bool
+	starts   map[string]time.Time
+	opassIDs map[string]string
+
 	snapshots map[string][]roomMeetingView
 }
 
@@ -92,6 +94,7 @@ func loadMeetingScheduleWithOptions(
 	}
 
 	starts := make(map[string]time.Time, len(mappings))
+	opassIDs := make(map[string]string, len(mappings))
 	mappedSessionIDs := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
 		startValue, found := sessionStarts[mapping.sessionID]
@@ -104,6 +107,7 @@ func loadMeetingScheduleWithOptions(
 			return meetingSchedule{}, nil, fmt.Errorf("session CSV line %d meeting %q has invalid opass start time %q", mapping.line, mapping.meetingID, startValue)
 		}
 		starts[mapping.meetingID] = start
+		opassIDs[mapping.meetingID] = mapping.sessionID
 		mappedSessionIDs[mapping.sessionID] = struct{}{}
 	}
 	for sessionID := range sessionStarts {
@@ -112,7 +116,10 @@ func loadMeetingScheduleWithOptions(
 		}
 	}
 
-	return meetingSchedule{enabled: true, starts: starts, snapshots: make(map[string][]roomMeetingView)}, warnings, nil
+	return meetingSchedule{
+		enabled: true, starts: starts, opassIDs: opassIDs,
+		snapshots: make(map[string][]roomMeetingView),
+	}, warnings, nil
 }
 
 func loadSessionMappings(path string) ([]sessionMapping, []scheduleWarning, error) {
