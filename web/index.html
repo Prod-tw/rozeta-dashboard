@@ -3,138 +3,151 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>Rozeta 控制器</title>
+		<meta name="theme-color" content="#f4f5f2" />
+		<title>教室主控台 | COSCUP</title>
 		<link rel="stylesheet" href="/assets/styles.css" />
+		<link rel="stylesheet" href="/assets/control.css" />
 	</head>
-	<body>
-		<main class="app-shell">
-			<header class="topbar">
-				<div>
-					<p class="eyebrow">COSCUP 維運中心</p>
-					<h1>Rozeta 宣告式控制器</h1>
-					<p>設定期望狀態，控制器會持續校正收音與 OBS embed 視窗。</p>
-					<label class="event-day-picker" for="event-day-select">
-						<span>活動日期</span>
-						<select id="event-day-select" aria-label="選擇活動日期"></select>
-					</label>
-				</div>
-				<div class="topbar-actions">
-					<div class="connection-pill" id="ws-status" role="status">連線中</div>
-					<button type="button" id="refresh-btn">立即觀測</button>
+	<body class="control-page">
+		<header class="control-header">
+			<div class="brand-lockup">
+				<h1>教室主控台</h1>
+			</div>
+			<div class="header-tools">
+				<span class="connection-pill" id="ws-status" role="status">連線中</span>
+				<button
+					type="button"
+					class="icon-button"
+					id="menu-button"
+					aria-expanded="false"
+					aria-controls="utility-menu"
+					aria-label="開啟功能選單"
+				>
+					⋯
+				</button>
+				<div class="utility-menu" id="utility-menu" hidden>
+					<button type="button" id="messages-button">訊息 <span id="message-count" hidden></span></button>
+					<a href="/debug">開啟除錯頁</a>
 					<button type="button" id="logout-btn">登出</button>
 				</div>
-			</header>
+			</div>
+		</header>
 
-			<section class="layout">
-				<section class="panel room-list-panel">
-					<div class="panel-header">
-						<div>
-							<h2>房間</h2>
-							<span class="room-visibility-summary" id="room-visibility-summary"></span>
+		<main class="control-shell">
+			<section class="selection-strip" aria-labelledby="selected-rooms-title">
+				<p class="section-kicker">工作範圍</p>
+				<div class="selection-layout">
+					<div class="selected-rooms-column">
+						<div class="scope-column-heading">
+							<h2 id="selected-rooms-title">已選取的教室</h2>
+							<button type="button" class="secondary-button" id="choose-rooms-btn">選擇教室</button>
 						</div>
-						<div class="panel-header-actions reconciliation-bulk-actions">
-							<button type="button" id="choose-rooms-btn">選擇房間</button>
-							<button type="button" id="start-all">開始全部</button>
-							<button type="button" id="stop-all">停止全部</button>
-							<button type="button" class="danger-action" id="force-stop-all" hidden>強制停止全部</button>
+						<div class="selected-room-tabs" id="selected-room-tabs"></div>
+					</div>
+					<div class="event-day-column">
+						<div class="scope-column-heading">
+							<h2>活動日期</h2>
 						</div>
+						<label class="day-picker">
+							<span class="sr-only">活動日期</span>
+							<select id="event-day-select" aria-label="選擇活動日期"></select>
+						</label>
 					</div>
-					<div class="table-wrap">
-						<table>
-							<thead>
-								<tr>
-									<th>房間</th>
-									<th>Lifecycle</th>
-									<th>期望會議</th>
-									<th>Active IDs</th>
-									<th>摘要</th>
-									<th>操作</th>
-								</tr>
-							</thead>
-							<tbody id="rooms-body"></tbody>
-						</table>
-					</div>
-				</section>
-
-				<section class="panel command-panel">
-					<div class="panel-header">
-						<h2>期望狀態</h2>
-						<span id="selected-room-label">尚未選擇房間</span>
-					</div>
-					<label
-						><span>目標會議</span
-						><input id="target-meeting" type="text" placeholder="從下方會議選取或輸入 ID"
-					/></label>
-					<div class="actions">
-						<button type="button" class="primary-action" id="apply-desired">套用期望會議</button>
-						<button type="button" class="danger-action" id="rearm-desired">重新授權 Resume</button>
-					</div>
-					<div class="details" id="room-details"></div>
-					<div class="meeting-list-header">
-						<h3>會議</h3>
-						<span id="meetings-status">請選擇房間</span>
-					</div>
-					<div class="meeting-list" id="room-meetings"></div>
-				</section>
+				</div>
 			</section>
+
+			<section class="operator-panel" aria-labelledby="operator-title">
+				<div class="section-heading">
+					<div>
+						<p class="section-kicker">目前工作</p>
+						<h2 id="operator-title">目前操作的教室</h2>
+					</div>
+					<span class="live-mark" id="operator-status">尚未選擇</span>
+				</div>
+				<div id="operator-content"></div>
+			</section>
+
+			<section class="room-section" aria-labelledby="rooms-title">
+				<div class="section-heading room-section-heading">
+					<div>
+						<p class="section-kicker">全覽</p>
+						<h2 id="rooms-title">教室狀態</h2>
+					</div>
+					<label class="search-field">
+						<span class="sr-only">搜尋教室名稱</span>
+						<input id="room-search" type="search" placeholder="搜尋教室名稱" autocomplete="off" />
+					</label>
+				</div>
+				<div class="room-grid" id="rooms-grid"></div>
+			</section>
+
+			<details class="advanced-section">
+				<summary>進階操作</summary>
+				<div class="advanced-content">
+					<p>批次操作會套用到所有已選取的教室。</p>
+					<div class="advanced-actions">
+						<button type="button" id="start-all">開始所有已選教室</button>
+						<button type="button" id="stop-all">停止所有已選教室</button>
+						<button type="button" class="danger-button" id="force-stop-all" hidden>
+							強制停止所有已選教室
+						</button>
+					</div>
+				</div>
+			</details>
 		</main>
-		<aside class="notifications" aria-label="通知"><div class="alerts" id="alerts" aria-live="polite"></div></aside>
-		<dialog id="desired-confirmation-dialog">
-			<form method="dialog" class="confirm-dialog">
-				<p class="eyebrow">破壞性操作</p>
-				<h2 id="desired-confirmation-title"></h2>
-				<p id="desired-confirmation-copy"></p>
-				<p class="confirmation-target" id="desired-confirmation-target"></p>
+
+		<aside class="message-drawer" id="message-drawer" aria-labelledby="messages-title" aria-hidden="true">
+			<div class="drawer-header">
+				<div>
+					<p class="section-kicker">伺服器訊息</p>
+					<h2 id="messages-title">訊息</h2>
+				</div>
+				<button type="button" class="icon-button" id="close-messages" aria-label="關閉訊息">×</button>
+			</div>
+			<div class="message-list" id="message-list" aria-live="polite"></div>
+		</aside>
+		<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+		<div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+		<dialog id="action-dialog">
+			<form method="dialog" class="control-dialog">
+				<p class="section-kicker" id="action-dialog-kicker">確認操作</p>
+				<h2 id="action-dialog-title"></h2>
+				<p id="action-dialog-copy"></p>
+				<div class="dialog-facts" id="action-dialog-facts"></div>
 				<div class="dialog-actions">
-					<button type="submit">取消</button
-					><button type="button" class="danger-action" id="desired-confirmation-confirm">
-						確認破壞性操作
-					</button>
+					<button type="submit" class="secondary-button">取消</button>
+					<button type="button" class="primary-button" id="action-confirm"></button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="reconciliation-dialog">
-			<form method="dialog" class="confirm-dialog">
-				<p class="eyebrow" id="reconciliation-dialog-eyebrow">校正程序</p>
-				<h2 id="reconciliation-dialog-title"></h2>
-				<p id="reconciliation-dialog-copy"></p>
-				<div class="dialog-room-list" id="reconciliation-dialog-rooms"></div>
+		<dialog id="agenda-dialog">
+			<form method="dialog" class="control-dialog">
+				<p class="section-kicker">切換議程</p>
+				<h2>確認新議程</h2>
+				<div class="agenda-confirmation" id="agenda-confirmation"></div>
 				<div class="dialog-actions">
-					<button type="submit">取消</button>
-					<button type="button" id="reconciliation-confirm">確認</button>
+					<button type="submit" class="secondary-button">取消</button>
+					<button type="button" class="primary-button" id="agenda-confirm">確認切換</button>
 				</div>
 			</form>
 		</dialog>
-		<dialog id="room-picker-dialog" aria-labelledby="room-picker-title" aria-describedby="room-picker-description">
-			<form class="room-picker-dialog" id="room-picker-form">
-				<div class="room-picker-header">
-					<div>
-						<p class="eyebrow">本機顯示設定</p>
-						<h2 id="room-picker-title">選擇要顯示的房間</h2>
-						<p class="sr-only" id="room-picker-description">這項設定只會儲存在目前的瀏覽器。</p>
-					</div>
-					<span id="room-picker-count"></span>
-				</div>
-				<label class="room-picker-search">
-					<span>搜尋房間</span>
-					<input id="room-picker-search" type="search" placeholder="輸入房間名稱" autocomplete="off" />
-				</label>
-				<div class="room-picker-tools">
-					<span id="room-picker-results"></span>
-					<div>
-						<button type="button" id="show-room-results">顯示結果</button>
-						<button type="button" id="show-only-room-results">只顯示結果</button>
-						<button type="button" id="hide-room-results">隱藏結果</button>
-					</div>
-				</div>
-				<div class="room-picker-options" id="room-picker-options"></div>
+		<dialog id="room-picker-dialog">
+			<form method="dialog" class="control-dialog room-picker-form" id="room-picker-form">
+				<p class="section-kicker">工作範圍</p>
+				<h2>選擇教室</h2>
+				<label class="search-field picker-search"
+					><span class="sr-only">搜尋教室名稱</span
+					><input id="room-picker-search" type="search" placeholder="搜尋教室名稱" autocomplete="off"
+				/></label>
+				<p class="picker-count" id="room-picker-count"></p>
+				<div class="picker-options" id="room-picker-options"></div>
 				<div class="dialog-actions">
-					<button type="button" id="room-picker-cancel">取消</button>
-					<button type="button" class="primary-action" id="room-picker-apply">套用</button>
+					<button type="button" class="secondary-button" id="room-picker-cancel">取消</button
+					><button type="button" class="primary-button" id="room-picker-apply">套用選擇</button>
 				</div>
 			</form>
 		</dialog>
-		<script src="/assets/tooltips.js" defer></script>
-		<script src="/assets/app.js" type="module"></script>
+		<script src="/assets/control.js" type="module"></script>
 	</body>
 </html>

@@ -1,104 +1,62 @@
-# Active Meeting Reconciliation Decisions
+# Admin 主控頁重新設計共識
 
-## Ownership And Desired State
+## 目的
 
-- Every account token is exclusively owned by its corresponding room controller. The controller may Start, Resume, and Pause any meeting returned for that account.
-- Persisted desired state contains only `meeting_id`, `generation`, and the consumed automatic-Resume record. `desired_running` is removed.
-- A suspended room may update and persist its desired meeting without sending any remote command.
-- An active desired update reconciles immediately. Switching to a completed meeting requires a destructive preflight and confirmation before accepting the new generation.
-- A room without persisted desired state is `InitialMeetingRequired`. Session schedule data only recommends and orders meetings; it never automatically selects desired state.
+建立一個給不熟悉系統的人使用的主控頁；目前完整的技術 admin page 保留作為除錯頁。
 
-## Lifecycle
+## 頁面與語言
 
-- Reconciliation lifecycle is process-local and is never persisted.
-- Lifecycle states are `suspended`, `starting`, `active`, and `stopping`.
-- Every process start leaves every room `suspended / ActiveSetUnknown` until an administrator starts it.
-- Active means the controller is maintaining the room invariant; it does not itself mean the remote meeting is already in progress.
-- Per-room and browser-captured bulk Start, Stop, and Force-stop controls remain available.
-- All Start, Stop, and Force-stop actions require confirmation.
-- Per-room lifecycle actions require the expected reconciliation run. Bulk requests atomically validate process epoch, unique valid room names, and every expected run before changing any room.
-- Browser-captured bulk operations use the frozen room list from the confirmation flow. Omitted rooms are unaffected.
+- `/` 是新的新手主控頁。
+- `/debug` 保留目前完整 admin page。
+- 所有使用者介面文案使用臺灣繁體中文。
+- 使用「教室」而不是 room，使用「議程」而不是 meeting。
+- 主控頁不顯示 epoch、revision、generation、active IDs、reconciliation 等內部欄位。
 
-## Active-Set Invariant
+## 教室選擇
 
-- The authoritative running observation is the complete paginated result of `GET /api/v1/meetings?status=in_progress` for the room account.
-- While active, the eventual invariant is that the desired meeting is the account's only `in_progress` meeting.
-- Convergence is reported only after a fresh active-set observation equals exactly `{desired}`.
-- The design is availability-first and eventually unique: when switching meetings, Start the new desired meeting before pausing old active meetings.
-- Once desired is observed `in_progress`, Pause all other active meetings. A failed old-meeting Pause leaves desired running, reports `MultipleInProgress / Degraded`, and continues retrying cleanup.
-- If desired is missing, inaccessible, or cannot be started, preserve existing active meetings. Only an explicit Stop pauses them.
-- If desired is already `in_progress`, treat browser route as correct, do not send Goto, and clean up any other active meetings.
-- If desired is not `in_progress`, attempt the complete ordered Goto pair, then immediately reconcile desired to `in_progress` even if Goto failed or its outcome is unknown.
-- If desired becomes `in_progress`, treat route as correct and stop retrying Goto. If desired remains absent from the active set, the next reconcile round attempts Goto again before Start or Resume.
-- Goto is always sent as normal `goto_meeting` followed by OBS-targeted `goto_meeting_embed`.
+- 只顯示使用者在「選擇教室」介面勾選的教室。
+- 沿用現有選擇介面的搜尋、勾選、顯示結果、只顯示結果、隱藏結果流程。
+- 勾選狀態只儲存在目前瀏覽器，不改變伺服器狀態。
+- 沒有勾選教室時顯示空狀態與「選擇教室」按鈕。
+- 「已選取的教室」與「目前操作的教室」是兩個獨立區塊。
+- 目前操作的教室只能從已選取教室中選擇。
+- 優先恢復上次操作的教室，否則使用第一間已勾選教室。
+- 「工作範圍」提供活動日期下拉選單；日期由 OPASS 的 `scheduled_start` 動態產生。
+- 優先選取裝置目前日期；若目前日期沒有議程，選取 OPASS 提供的最早日期。
+- 日期只篩選目前操作教室的議程，不影響教室選擇或教室狀態卡片。
 
-## Meeting Transitions
+## 控制流程
 
-- A desired meeting in `ready` or `paused` receives Start.
-- A desired meeting in `in_progress` needs no Start.
-- A desired meeting in `completed` may be automatically Resumed at most once per desired generation.
-- Automatic Resume consumption is persisted atomically before dispatch, including generation and completed `updated_at`, so crash or timeout cannot repeat the destructive operation for that generation.
-- Start confirmation authorises one automatic Resume for the current desired generation. Active switching to a completed desired meeting requires a fresh destructive confirmation for the new generation.
-- If the same generation reaches `completed` after its Resume allowance was consumed, the room remains `active / Blocked / ResumeLimitReached` and continues observation without another Resume.
-- A dedicated destructive re-arm operation increments generation for the same desired meeting and grants the new generation one Resume allowance. Re-sending the same desired update never implicitly re-arms it.
-- Re-arm may update suspended desired state without remote commands; an active re-arm reconciles immediately.
+- 每張教室卡片顯示教室名稱、白話狀態、目前議程，以及「開始教室／停止教室」。
+- 開始與停止都必須先確認。
+- 按鈕代表高階 reconciliation 意圖，不直接代表單一 `start_meeting` API。
+- 操作中顯示「正在開始教室／正在停止教室」，收到伺服器狀態後才顯示完成或需要處理。
+- WebSocket 中斷時暫停開始、停止與切換議程，直到收到新的快照。
+- 批次操作與強制停止放入可收起的進階操作區。
+- 開始／停止確認只顯示教室名稱、目前議程與動作；強制停止另顯示遠端結果可能未知。
 
-## Stop And Force-Stop
+## 議程
 
-- Normal Stop is a declarative transition whose remote target is an empty active set.
-- Stop immediately disables automatic Resume and rejects new Goto, Start, Resume, desired-update, and ordinary reconcile work.
-- A single HTTP request already dispatched when Stop is accepted may finish or time out. No later step from its old reconcile sequence may start.
-- Stopping then repeatedly observes the active set, Pauses every `in_progress` meeting, and becomes suspended only after a fresh observation is empty.
-- Stop preflight displays the current active meetings. A room whose active set cannot be observed is not normally stopped; the administrator may retry or force-stop it.
-- A stopping room exposes Force-stop immediately and automatically force-stops after 30 seconds.
-- Force-stop cancels and ignores local old-run work but cannot revoke commands already accepted by Rozeta. It becomes `suspended / RemoteOutcomeUnknown` and may restart immediately.
-- A fresh normal-stop empty observation is retained as `LastStopConfirmedEmpty` but becomes stale after suspension. Suspended never claims the remote active set is currently empty.
+- 「目前操作的教室」區塊負責切換議程。
+- 所有議程都顯示，不隱藏已完成議程。
+- 議程顯示名稱、開始時間與狀態。
+- 切換議程確認只顯示新議程名稱與開始時間。
+- 使用中教室確認新議程後立即進入切換流程。
+- 已停止教室確認後只設定目前議程，由使用者另外按「開始教室」。
 
-## Observation And Controller Shape
+## 訊息與除錯
 
-- Online-count, `WaitingForClients`, presence readiness, `navigationReady`, and Goto grace timers are removed from control and admin UI.
-- Each room uses one serial actor and one coalesced reconcile path: `Observe -> Diff -> Act -> Requeue`.
-- Every event, timer, request, result, and completion is fenced by reconciliation run and desired generation.
-- Reconcile polls the active set every five seconds and immediately after control commands. Full meeting data remains available for selection and desired-status checks.
-- Start, Pause, and Resume retries are observation-driven: dispatch at most once per reconcile round, then perform a fresh observation before another dispatch. Resume is never blindly retried inside one HTTP retry loop.
-- All Rozeta requests continue through the global six-request scheduler with control-request priority.
+- 其他功能收進可收起區塊；訊息使用抽屜呈現。
+- 訊息抽屜顯示目前瀏覽器工作階段的操作結果與異常。
+- 訊息使用人類可讀格式，包含時間、教室、事件與簡短訊息。
+- 技術細節保留在 `/debug`。
+- `/debug` 的入口不放在主流程中，置於功能選單或進階區。
 
-## Conditions And Admin UI
+## 視覺與可用性
 
-- Snapshots expose lifecycle, reconciliation run, active meeting IDs, active-set observation time and staleness, desired status, recent actions, and structured conditions.
-- Core conditions are `ReconciliationActive`, `DesiredMeetingSoleInProgress`, `ActiveSetObserved`, and the latest Goto dispatch result.
-- Summary states include `Converged / DesiredMeetingSoleInProgress`, `Reconciling / StartingDesiredMeeting`, `Degraded / MultipleInProgress`, `Blocked / DesiredMeetingMissing`, `Blocked / ResumeLimitReached`, `Reconciling / PausingAllMeetings`, `Suspended / ActiveSetUnknown`, `Suspended / LastStopConfirmedEmpty`, and `Suspended / RemoteOutcomeUnknown`.
-- Start preflight reads each frozen target's desired status and active set. It lists completed rooms and destructive risk before confirmation.
-- Start All preflight may partially succeed. Rooms whose remote status cannot be observed remain suspended; observable rooms may start. Optimistic epoch/name/run validation remains atomic before remote preflight.
-- Start and active desired-change confirmation explicitly warn that automatic Resume permanently deletes completed transcripts and translations.
-- Stop confirmation lists the active meetings that will be Paused.
-
-## Persistence Migration
-
-- Controller state version 2 removes `running` and persists consumed automatic-Resume information.
-- Existing version 1 state is migrated atomically by preserving meeting ID and generation and dropping `running`.
-- Migration never starts reconciliation or sends a remote command.
-
-## Room Visibility And Bulk Scope
-
-- The room picker controls only which rooms are displayed in the current browser. It does not change server state.
-- Room visibility is stored in browser-local `localStorage`; different browsers and administrator devices have independent preferences.
-- The first use and newly configured rooms default to visible. Only explicitly hidden rooms remain hidden.
-- Search is case-insensitive plain substring matching. Character-pattern matching such as `?` and `*` is not supported.
-- Search changes only the picker results. Visibility changes are applied only after an explicit picker action and `套用`; cancelling discards the draft.
-- Hiding the currently selected room clears the selected room and its desired-state editor.
-- `開始全部`, `停止全部`, and `強制停止全部` operate only on rooms visible when the batch button is pressed. The target list is frozen through preflight and confirmation.
-- Batch lifecycle eligibility remains unchanged: Start targets visible `suspended` rooms, Stop targets visible `starting` or `active` rooms, and Force-stop targets visible `stopping` rooms.
-- Hidden rooms are omitted from all batch requests. If no visible room is eligible, the corresponding batch button is disabled and sends no request.
-
-## Strict Meeting Schedule Validation
-
-- The admin meeting list is ordered strictly by the `start` time from the startup-loaded `opass.json` snapshot.
-- `-session` is required. The meeting list uses only the three-way intersection of OPASS, `session.csv`, and Rozeta meetings.
-- A valid OPASS/session mapping that is absent from Rozeta, an OPASS session absent from `session.csv`, or a Rozeta meeting absent from the other two sources is ignored as nonexistent and logged.
-- Every retained OPASS session must have a non-empty, valid RFC3339 `start`; duplicate IDs, empty IDs, invalid starts, and malformed CSV remain major errors.
-- Meeting start times must be unique within each room. Meetings with equal starts are a major error; no tie-break ordering is used.
-- Startup validation runs in order: load OPASS with bounded retries, load and validate `session.csv`, then fetch the complete paginated Rozeta meeting list for every room. OPASS failure stops later checks.
-- The HTTP server always starts. A startup or later major error puts the whole server in major-error mode: every route, API request, static asset request, and WebSocket upgrade returns a `503` major-error page, and no normal checks or handlers run.
-- The startup Rozeta meeting identity list is fixed after validation. Later status refreshes may update meeting status; added or removed unmatched meetings are ignored and logged, while fetch failures remain major errors. OPASS is never reloaded.
-- The major-error page shows safe diagnostic context such as phase, room, meeting/session IDs, an error summary, and time; credentials and complete remote response bodies are never exposed.
+- 手機優先，教室使用卡片而不是表格。
+- 主控頁採安靜、清楚的營運工具風格，不使用技術 dashboard 的密集視覺。
+- 使用中、已停止、啟動中、停止中、需要處理、連線異常等狀態同時顯示文字與色彩。
+- 深色／淺色完全跟隨裝置的 `prefers-color-scheme`，不提供手動切換。
+- 主要控制元件觸控高度至少約 44px。
+- 支援鍵盤焦點、Enter 操作、螢幕閱讀器提示、對話框焦點管理與 `prefers-reduced-motion`。

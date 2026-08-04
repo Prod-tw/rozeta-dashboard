@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Rozeta 控制器</title>
+		<link rel="stylesheet" href="/assets/styles.css" />
+	</head>
+	<body>
+		<main class="app-shell">
+			<header class="topbar">
+				<div>
+					<h1>Rozeta 宣告式控制器</h1>
+					<p>設定期望狀態，控制器會持續校正收音與 OBS embed 視窗。</p>
+					<label class="event-day-picker" for="event-day-select">
+						<span>活動日期</span>
+						<select id="event-day-select" aria-label="選擇活動日期"></select>
+					</label>
+				</div>
+				<div class="topbar-actions">
+					<div class="connection-pill" id="ws-status" role="status">連線中</div>
+					<button type="button" id="refresh-btn">立即觀測</button>
+					<button type="button" id="logout-btn">登出</button>
+				</div>
+			</header>
+
+			<section class="layout">
+				<section class="panel room-list-panel">
+					<div class="panel-header">
+						<div>
+							<h2>房間</h2>
+							<span class="room-visibility-summary" id="room-visibility-summary"></span>
+						</div>
+						<div class="panel-header-actions reconciliation-bulk-actions">
+							<button type="button" id="choose-rooms-btn">選擇房間</button>
+							<button type="button" id="start-all">開始全部</button>
+							<button type="button" id="stop-all">停止全部</button>
+							<button type="button" class="danger-action" id="force-stop-all" hidden>強制停止全部</button>
+						</div>
+					</div>
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr>
+									<th>房間</th>
+									<th>Lifecycle</th>
+									<th>期望會議</th>
+									<th>Active IDs</th>
+									<th>摘要</th>
+									<th>操作</th>
+								</tr>
+							</thead>
+							<tbody id="rooms-body"></tbody>
+						</table>
+					</div>
+				</section>
+
+				<section class="panel command-panel">
+					<div class="panel-header">
+						<h2>期望狀態</h2>
+						<span id="selected-room-label">尚未選擇房間</span>
+					</div>
+					<label
+						><span>目標會議</span
+						><input id="target-meeting" type="text" placeholder="從下方會議選取或輸入 ID"
+					/></label>
+					<div class="actions">
+						<button type="button" class="primary-action" id="apply-desired">套用期望會議</button>
+						<button type="button" class="danger-action" id="rearm-desired">重新授權 Resume</button>
+					</div>
+					<div class="details" id="room-details"></div>
+					<div class="meeting-list-header">
+						<h3>會議</h3>
+						<span id="meetings-status">請選擇房間</span>
+					</div>
+					<div class="meeting-list" id="room-meetings"></div>
+				</section>
+			</section>
+		</main>
+		<aside class="notifications" aria-label="通知"><div class="alerts" id="alerts" aria-live="polite"></div></aside>
+		<dialog id="desired-confirmation-dialog">
+			<form method="dialog" class="confirm-dialog">
+				<p class="eyebrow">破壞性操作</p>
+				<h2 id="desired-confirmation-title"></h2>
+				<p id="desired-confirmation-copy"></p>
+				<p class="confirmation-target" id="desired-confirmation-target"></p>
+				<div class="dialog-actions">
+					<button type="submit">取消</button
+					><button type="button" class="danger-action" id="desired-confirmation-confirm">
+						確認破壞性操作
+					</button>
+				</div>
+			</form>
+		</dialog>
+		<dialog id="reconciliation-dialog">
+			<form method="dialog" class="confirm-dialog">
+				<p class="eyebrow" id="reconciliation-dialog-eyebrow">校正程序</p>
+				<h2 id="reconciliation-dialog-title"></h2>
+				<p id="reconciliation-dialog-copy"></p>
+				<div class="dialog-room-list" id="reconciliation-dialog-rooms"></div>
+				<div class="dialog-actions">
+					<button type="submit">取消</button>
+					<button type="button" id="reconciliation-confirm">確認</button>
+				</div>
+			</form>
+		</dialog>
+		<dialog id="room-picker-dialog" aria-labelledby="room-picker-title" aria-describedby="room-picker-description">
+			<form class="room-picker-dialog" id="room-picker-form">
+				<div class="room-picker-header">
+					<div>
+						<p class="eyebrow">本機顯示設定</p>
+						<h2 id="room-picker-title">選擇要顯示的房間</h2>
+						<p class="sr-only" id="room-picker-description">這項設定只會儲存在目前的瀏覽器。</p>
+					</div>
+					<span id="room-picker-count"></span>
+				</div>
+				<label class="room-picker-search">
+					<span>搜尋房間</span>
+					<input id="room-picker-search" type="search" placeholder="輸入房間名稱" autocomplete="off" />
+				</label>
+				<div class="room-picker-tools">
+					<span id="room-picker-results"></span>
+					<div>
+						<button type="button" id="show-room-results">顯示結果</button>
+						<button type="button" id="show-only-room-results">只顯示結果</button>
+						<button type="button" id="hide-room-results">隱藏結果</button>
+					</div>
+				</div>
+				<div class="room-picker-options" id="room-picker-options"></div>
+				<div class="dialog-actions">
+					<button type="button" id="room-picker-cancel">取消</button>
+					<button type="button" class="primary-action" id="room-picker-apply">套用</button>
+				</div>
+			</form>
+		</dialog>
+		<script src="/assets/tooltips.js" defer></script>
+		<script src="/assets/app.js" type="module"></script>
+	</body>
+</html>

@@ -210,6 +210,7 @@ func (a *app) router() (*gin.Engine, error) {
 	protected := router.Group("/")
 	protected.Use(a.requireAdmin)
 	protected.GET("/", a.handleIndex)
+	protected.GET("/debug", a.handleDebug)
 	protected.POST("/api/logout", a.requireSameOrigin, a.handleLogout)
 	router.POST("/api/v1/rooms/:roomName/actions/advance-and-start", a.requireExternalAPI, a.handleAdvanceAndStart)
 	protected.GET("/api/rooms", a.handleListRooms)
@@ -259,6 +260,8 @@ func (a *app) writeMajorError(c *gin.Context, state *majorErrorState) {
 func (a *app) handleAsset(c *gin.Context) {
 	contentTypes := map[string]string{
 		"app.js":      "text/javascript; charset=utf-8",
+		"control.js":  "text/javascript; charset=utf-8",
+		"control.css": "text/css; charset=utf-8",
 		"login.js":    "text/javascript; charset=utf-8",
 		"styles.css":  "text/css; charset=utf-8",
 		"tooltips.js": "text/javascript; charset=utf-8",
@@ -279,7 +282,15 @@ func (a *app) handleAsset(c *gin.Context) {
 }
 
 func (a *app) handleIndex(c *gin.Context) {
-	data, err := webAssets.ReadFile("web/index.html")
+	a.handlePage(c, "index.html")
+}
+
+func (a *app) handleDebug(c *gin.Context) {
+	a.handlePage(c, "debug.html")
+}
+
+func (a *app) handlePage(c *gin.Context, name string) {
+	data, err := webAssets.ReadFile("web/" + name)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "failed to load index")
 		return
