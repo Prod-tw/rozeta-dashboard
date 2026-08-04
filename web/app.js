@@ -10,9 +10,11 @@ import {
 	reconciliationRequestBody,
 	reconciliationTargets,
 	reconcileAuthoritativeRooms,
+	roomNameIncludes,
 	shouldAcceptConflictSnapshot,
 	shouldAcceptSnapshot,
 	takeBufferedRoomSnapshots,
+	visibleRooms,
 } from './state.js'
 
 const state = {
@@ -22,6 +24,9 @@ const state = {
 	rooms: new Map(),
 	meetings: new Map(),
 	selectedRoom: '',
+	// WHY: visibility is a browser-local display preference, so hidden names stay separate from authoritative room state.
+	hiddenRooms: new Set(),
+	roomPickerDraft: new Set(),
 	formGeneration: 0,
 	formDirty: false,
 	pendingDesired: null,
@@ -30,7 +35,7 @@ const state = {
 }
 
 const roomsBody = document.getElementById('rooms-body')
-const roomCount = document.getElementById('room-count')
+const roomVisibilitySummary = document.getElementById('room-visibility-summary')
 const targetMeeting = document.getElementById('target-meeting')
 const selectedRoomLabel = document.getElementById('selected-room-label')
 const roomDetails = document.getElementById('room-details')
@@ -47,8 +52,22 @@ const reconciliationConfirm = document.getElementById('reconciliation-confirm')
 const startAllButton = document.getElementById('start-all')
 const stopAllButton = document.getElementById('stop-all')
 const forceStopAllButton = document.getElementById('force-stop-all')
+const roomPickerDialog = document.getElementById('room-picker-dialog')
+const roomPickerSearch = document.getElementById('room-picker-search')
+const roomPickerCount = document.getElementById('room-picker-count')
+const roomPickerResults = document.getElementById('room-picker-results')
+const roomPickerOptions = document.getElementById('room-picker-options')
+
+const roomVisibilityStorageKey = 'coscup-caption.admin-room-visibility.v1'
 
 document.getElementById('logout-btn').addEventListener('click', () => void logout())
+document.getElementById('choose-rooms-btn').addEventListener('click', openRoomPicker)
+document.getElementById('show-room-results').addEventListener('click', () => setRoomPickerResultsVisible(true))
+document.getElementById('show-only-room-results').addEventListener('click', showOnlyRoomPickerResults)
+document.getElementById('hide-room-results').addEventListener('click', () => setRoomPickerResultsVisible(false))
+document.getElementById('room-picker-cancel').addEventListener('click', () => roomPickerDialog.close())
+document.getElementById('room-picker-apply').addEventListener('click', applyRoomPicker)
+document.getElementById('room-picker-form').addEventListener('submit', event => event.preventDefault())
 refreshButton.addEventListener('click', () => {
 	if (state.selectedRoom) void observe(state.selectedRoom)
 })
@@ -58,6 +77,7 @@ startAllButton.addEventListener('click', () => void beginBulkReconciliation('sta
 stopAllButton.addEventListener('click', () => void beginBulkReconciliation('stop'))
 forceStopAllButton.addEventListener('click', () => void beginBulkReconciliation('force-stop'))
 targetMeeting.addEventListener('input', () => (state.formDirty = true))
+roomPickerSearch.addEventListener('input', renderRoomPicker)
 desiredConfirmationConfirm.addEventListener('click', () => {
 	const intent = state.pendingDesired
 	desiredConfirmationDialog.close()
@@ -105,13 +125,20 @@ async function loadRooms() {
 	const response = await apiFetch('/api/rooms')
 	const body = await response.json()
 	setRooms(body.rooms || [], body.epoch, 'http')
-	if (!state.selectedRoom && state.rooms.size) void selectRoom(Array.from(state.rooms.keys()).sort()[0])
+	if (!state.selectedRoom) {
+		const firstVisibleRoom = getVisibleRooms()[0]
+		if (firstVisibleRoom) void selectRoom(firstVisibleRoom.room_name)
+	}
 	render()
 }
 
 async function selectRoom(roomName) {
 	state.selectedRoom = roomName
 	syncDesiredForm(state.rooms.get(roomName))
+	if (!roomName) {
+		render()
+		return
+	}
 	meetingsStatus.textContent = '載入會議中'
 	render()
 	try {
@@ -143,7 +170,7 @@ function setRooms(rooms, epoch, source) {
 		closePendingDialogs()
 	}
 	if (!state.rooms.has(state.selectedRoom)) {
-		state.selectedRoom = Array.from(state.rooms.keys()).sort()[0] || ''
+		state.selectedRoom = getVisibleRooms()[0]?.room_name || ''
 		state.formDirty = false
 		closePendingDialogs()
 	}
@@ -282,7 +309,9 @@ async function sendDesired(intent, confirmDestructiveResume) {
 }
 
 async function beginBulkReconciliation(action) {
-	const targets = reconciliationTargets(state.rooms.values(), action)
+	// WHY: hidden rooms used to remain in the authoritative map and were therefore included in batch requests. Freeze only
+	// visible rooms so the picker controls the exact batch scope without changing server-side room state.
+	const targets = reconciliationTargets(getVisibleRooms(), action)
 	if (!targets.length) return
 	await beginReconciliation({ action, targets, bulk: true, epoch: state.epoch })
 }
@@ -468,11 +497,13 @@ function render() {
 	renderRooms()
 	renderDetails()
 	renderMeetings()
+	if (roomPickerDialog.open) renderRoomPicker()
 }
 
 function renderRooms() {
-	const rooms = Array.from(state.rooms.values()).sort((left, right) => left.room_name.localeCompare(right.room_name))
-	roomCount.textContent = `${rooms.length} 個房間`
+	const allRooms = getSortedRooms()
+	const rooms = getVisibleRooms()
+	roomVisibilitySummary.textContent = `顯示 ${rooms.length} / ${allRooms.length} 個房間`
 	const startTargets = reconciliationTargets(rooms, 'start')
 	const stopTargets = reconciliationTargets(rooms, 'stop')
 	const forceStopTargets = reconciliationTargets(rooms, 'force-stop')
@@ -480,6 +511,13 @@ function renderRooms() {
 	stopAllButton.disabled = state.requestPending || stopTargets.length === 0
 	forceStopAllButton.hidden = forceStopTargets.length === 0
 	forceStopAllButton.disabled = state.requestPending
+	if (!rooms.length) {
+		const message = allRooms.length
+			? '目前沒有選擇要顯示的房間，請使用「選擇房間」更新清單。'
+			: '尚未設定任何房間。'
+		roomsBody.innerHTML = `<tr><td colspan="6">${message}</td></tr>`
+		return
+	}
 	roomsBody.innerHTML = rooms
 		.map(room => {
 			const action = reconciliationActionFor(room)
@@ -506,6 +544,105 @@ function renderRooms() {
 			void beginRoomReconciliation(button.dataset.reconciliationRoom)
 		}),
 	)
+}
+
+function loadRoomVisibility() {
+	try {
+		const stored = window.localStorage.getItem(roomVisibilityStorageKey)
+		if (!stored) return
+		const preference = JSON.parse(stored)
+		if (preference?.version !== 1 || !Array.isArray(preference.hiddenRooms)) return
+		state.hiddenRooms = new Set(
+			preference.hiddenRooms.map(roomName => String(roomName).trim()).filter(roomName => roomName),
+		)
+	} catch {
+		showAlert('無法載入房間顯示設定，將顯示所有房間。')
+	}
+}
+
+function saveRoomVisibility() {
+	try {
+		window.localStorage.setItem(
+			roomVisibilityStorageKey,
+			JSON.stringify({ version: 1, hiddenRooms: Array.from(state.hiddenRooms).sort() }),
+		)
+	} catch {
+		showAlert('無法儲存房間顯示設定，重新整理後可能會遺失這次選擇。')
+	}
+}
+
+function openRoomPicker() {
+	state.roomPickerDraft = new Set(state.hiddenRooms)
+	roomPickerSearch.value = ''
+	renderRoomPicker()
+	roomPickerDialog.showModal()
+	roomPickerSearch.focus()
+}
+
+function renderRoomPicker() {
+	const rooms = getRoomPickerResults()
+	const visibleCount = getSortedRooms().filter(room => !state.roomPickerDraft.has(room.room_name)).length
+	roomPickerCount.textContent = `已選擇 ${visibleCount} 個房間`
+	roomPickerResults.textContent = `符合條件：${rooms.length} 個房間`
+	if (!rooms.length) {
+		roomPickerOptions.innerHTML = '<div class="room-picker-empty">沒有符合搜尋條件的房間。</div>'
+		return
+	}
+	roomPickerOptions.innerHTML = rooms
+		.map(
+			room => `
+				<label class="room-picker-option">
+					<input type="checkbox" data-room-picker="${escapeAttr(room.room_name)}" ${state.roomPickerDraft.has(room.room_name) ? '' : 'checked'} />
+					<span>${escapeHtml(room.room_name)}</span>
+				</label>
+			`,
+		)
+		.join('')
+	roomPickerOptions.querySelectorAll('[data-room-picker]').forEach(checkbox => {
+		checkbox.addEventListener('change', () => {
+			if (checkbox.checked) state.roomPickerDraft.delete(checkbox.dataset.roomPicker)
+			else state.roomPickerDraft.add(checkbox.dataset.roomPicker)
+			renderRoomPicker()
+		})
+	})
+}
+
+function setRoomPickerResultsVisible(visible) {
+	getRoomPickerResults().forEach(room => {
+		if (visible) state.roomPickerDraft.delete(room.room_name)
+		else state.roomPickerDraft.add(room.room_name)
+	})
+	renderRoomPicker()
+}
+
+function showOnlyRoomPickerResults() {
+	const matchingRooms = new Set(getRoomPickerResults().map(room => room.room_name))
+	getSortedRooms().forEach(room => {
+		if (matchingRooms.has(room.room_name)) state.roomPickerDraft.delete(room.room_name)
+		else state.roomPickerDraft.add(room.room_name)
+	})
+	renderRoomPicker()
+}
+
+function applyRoomPicker() {
+	state.hiddenRooms = new Set(state.roomPickerDraft)
+	saveRoomVisibility()
+	roomPickerDialog.close()
+	if (state.selectedRoom && state.hiddenRooms.has(state.selectedRoom)) selectRoom('')
+	else render()
+}
+
+function getSortedRooms() {
+	return Array.from(state.rooms.values()).sort((left, right) => left.room_name.localeCompare(right.room_name))
+}
+
+function getVisibleRooms() {
+	return visibleRooms(getSortedRooms(), state.hiddenRooms)
+}
+
+function getRoomPickerResults() {
+	const pattern = roomPickerSearch.value.trim()
+	return getSortedRooms().filter(room => !pattern || roomNameIncludes(room.room_name, pattern))
 }
 
 function renderDetails() {
@@ -653,6 +790,11 @@ function escapeHtml(value) {
 		.replaceAll("'", '&#39;')
 }
 
+function escapeAttr(value) {
+	return escapeHtml(value)
+}
+
+loadRoomVisibility()
 loadRooms()
 	.then(connectAdminSocket)
 	.catch(error => {

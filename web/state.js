@@ -150,3 +150,11 @@ export function canEditDesired(room) {
 export function canObserve(room) {
 	return room?.lifecycle === 'active'
 }
+
+export function visibleRooms(rooms, hiddenRooms) {
+	return Array.from(rooms).filter(room => !hiddenRooms.has(room.room_name))
+}
+
+export function roomNameIncludes(roomName, pattern) {
+	return String(roomName).toLocaleLowerCase().includes(String(pattern).toLocaleLowerCase())
+}

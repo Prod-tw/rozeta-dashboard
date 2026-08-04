@@ -16,6 +16,8 @@ import {
 	shouldAcceptConflictSnapshot,
 	shouldAcceptSnapshot,
 	takeBufferedRoomSnapshots,
+	roomNameIncludes,
+	visibleRooms,
 } from './state.js'
 
 test('a restarted process can replace a higher old revision', () => {
@@ -222,4 +224,20 @@ test('desired editing and manual observation follow lifecycle constraints', () =
 	assert.equal(canEditDesired({ lifecycle: 'stopping' }), false)
 	assert.equal(canObserve({ lifecycle: 'active' }), true)
 	assert.equal(canObserve({ lifecycle: 'starting' }), false)
+})
+
+test('room visibility filters only hidden rooms and preserves new rooms by default', () => {
+	const rooms = [{ room_name: 'Room-A' }, { room_name: 'Room-B' }, { room_name: 'Room-C' }]
+	assert.deepEqual(visibleRooms(rooms, new Set(['Room-B'])), [{ room_name: 'Room-A' }, { room_name: 'Room-C' }])
+	assert.deepEqual(visibleRooms(rooms, new Set(['Room-B', 'Removed-Room'])), [
+		{ room_name: 'Room-A' },
+		{ room_name: 'Room-C' },
+	])
+})
+
+test('room picker search uses case-insensitive substring matching only', () => {
+	assert.equal(roomNameIncludes('Room-A', 'oom-'), true)
+	assert.equal(roomNameIncludes('Room-A', 'ROOM'), true)
+	assert.equal(roomNameIncludes('Room-A', '*'), false)
+	assert.equal(roomNameIncludes('Room-A', '?'), false)
 })

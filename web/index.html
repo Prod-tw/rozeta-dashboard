@@ -26,9 +26,10 @@
 					<div class="panel-header">
 						<div>
 							<h2>房間</h2>
-							<span id="room-count"></span>
+							<span class="room-visibility-summary" id="room-visibility-summary"></span>
 						</div>
 						<div class="panel-header-actions reconciliation-bulk-actions">
+							<button type="button" id="choose-rooms-btn">選擇房間</button>
 							<button type="button" id="start-all">開始全部</button>
 							<button type="button" id="stop-all">停止全部</button>
 							<button type="button" class="danger-action" id="force-stop-all" hidden>強制停止全部</button>
@@ -97,6 +98,35 @@
 				<div class="dialog-actions">
 					<button type="submit">取消</button>
 					<button type="button" id="reconciliation-confirm">確認</button>
+				</div>
+			</form>
+		</dialog>
+		<dialog id="room-picker-dialog" aria-labelledby="room-picker-title" aria-describedby="room-picker-description">
+			<form class="room-picker-dialog" id="room-picker-form">
+				<div class="room-picker-header">
+					<div>
+						<p class="eyebrow">本機顯示設定</p>
+						<h2 id="room-picker-title">選擇要顯示的房間</h2>
+						<p class="sr-only" id="room-picker-description">這項設定只會儲存在目前的瀏覽器。</p>
+					</div>
+					<span id="room-picker-count"></span>
+				</div>
+				<label class="room-picker-search">
+					<span>搜尋房間</span>
+					<input id="room-picker-search" type="search" placeholder="輸入房間名稱" autocomplete="off" />
+				</label>
+				<div class="room-picker-tools">
+					<span id="room-picker-results"></span>
+					<div>
+						<button type="button" id="show-room-results">顯示結果</button>
+						<button type="button" id="show-only-room-results">只顯示結果</button>
+						<button type="button" id="hide-room-results">隱藏結果</button>
+					</div>
+				</div>
+				<div class="room-picker-options" id="room-picker-options"></div>
+				<div class="dialog-actions">
+					<button type="button" id="room-picker-cancel">取消</button>
+					<button type="button" class="primary-action" id="room-picker-apply">套用</button>
 				</div>
 			</form>
 		</dialog>
