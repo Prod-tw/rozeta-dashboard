@@ -12,6 +12,7 @@ services:
       # interpolation now reports the missing variable before Compose creates it.
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      EXTERNAL_API_TOKEN: ${EXTERNAL_API_TOKEN:?EXTERNAL_API_TOKEN is required}
     volumes:
       - type: bind
         # The old room.csv mount followed the removed -token-file option. Keep the

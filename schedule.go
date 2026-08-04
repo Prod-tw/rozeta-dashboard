@@ -20,6 +20,12 @@ type meetingSchedule struct {
 	starts  map[string]time.Time
 }
 
+var (
+	errScheduleUnavailable       = errors.New("meeting schedule is unavailable")
+	errCurrentMeetingUnscheduled = errors.New("current desired meeting is not scheduled")
+	errNextMeetingNotFound       = errors.New("next scheduled meeting was not found")
+)
+
 type scheduleWarning struct {
 	Line      int
 	MeetingID string
@@ -279,6 +285,47 @@ func (schedule meetingSchedule) prepareMeetings(meetings []roomMeetingView) []ro
 		return meetingTitleBefore(prepared[left], prepared[right])
 	})
 	return prepared
+}
+
+func (schedule meetingSchedule) nextMeeting(meetings []roomMeetingView, currentID string) (roomMeetingView, error) {
+	// WHY: Rozeta's response order is not a schedule. Previously the UI could only display
+	// that order; advance now sorts the known scheduled meetings deterministically and rejects
+	// an unscheduled current target instead of guessing which meeting comes next.
+	if !schedule.enabled || len(schedule.starts) == 0 {
+		return roomMeetingView{}, errScheduleUnavailable
+	}
+	if _, scheduled := schedule.starts[currentID]; !scheduled {
+		return roomMeetingView{}, errCurrentMeetingUnscheduled
+	}
+	ordered := make([]roomMeetingView, 0, len(meetings))
+	for _, meeting := range meetings {
+		start, found := schedule.starts[meeting.ID]
+		if !found {
+			continue
+		}
+		copy := meeting
+		copy.ScheduledStart = &start
+		ordered = append(ordered, copy)
+	}
+	sort.Slice(ordered, func(left, right int) bool {
+		leftStart := ordered[left].ScheduledStart
+		rightStart := ordered[right].ScheduledStart
+		if !leftStart.Equal(*rightStart) {
+			return leftStart.Before(*rightStart)
+		}
+		return meetingTitleBefore(ordered[left], ordered[right])
+	})
+	currentIndex := -1
+	for index, meeting := range ordered {
+		if meeting.ID == currentID {
+			currentIndex = index
+			break
+		}
+	}
+	if currentIndex < 0 || currentIndex+1 >= len(ordered) {
+		return roomMeetingView{}, errNextMeetingNotFound
+	}
+	return ordered[currentIndex+1], nil
 }
 
 func meetingTitleBefore(left, right roomMeetingView) bool {

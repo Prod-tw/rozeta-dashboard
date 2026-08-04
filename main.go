@@ -32,18 +32,19 @@ const (
 )
 
 type app struct {
-	ctx             context.Context
-	state           *state
-	tokenStore      map[string]string
-	meetingSchedule meetingSchedule
-	rozetaBaseURL   string
-	httpClient      *http.Client
-	adminPassword   string
-	sessionSecret   []byte
-	loginLimiter    *loginLimiter
-	upgrader        websocket.Upgrader
-	controller      *controller
-	epoch           string
+	ctx              context.Context
+	state            *state
+	tokenStore       map[string]string
+	meetingSchedule  meetingSchedule
+	rozetaBaseURL    string
+	httpClient       *http.Client
+	adminPassword    string
+	sessionSecret    []byte
+	externalAPIToken string
+	loginLimiter     *loginLimiter
+	upgrader         websocket.Upgrader
+	controller       *controller
+	epoch            string
 }
 
 func main() {
@@ -64,6 +65,10 @@ func main() {
 	sessionSecret := []byte(os.Getenv("SESSION_SECRET"))
 	if len(sessionSecret) < 32 {
 		log.Fatal("SESSION_SECRET must contain at least 32 bytes")
+	}
+	externalAPIToken := strings.TrimSpace(os.Getenv("EXTERNAL_API_TOKEN"))
+	if externalAPIToken == "" {
+		log.Fatal("EXTERNAL_API_TOKEN is required")
 	}
 	tokens, err := loadRoomTokens(*accountFile)
 	if err != nil {
@@ -107,6 +112,7 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	a := newApp(ctx, tokens, adminPassword, sessionSecret)
+	a.externalAPIToken = externalAPIToken
 	a.meetingSchedule = schedule
 	controller, err := newController(ctx, a, tokens, schedule, *stateFile)
 	if err != nil {
@@ -209,6 +215,7 @@ func (a *app) router() (*gin.Engine, error) {
 	protected.Use(a.requireAdmin)
 	protected.GET("/", a.handleIndex)
 	protected.POST("/api/logout", a.requireSameOrigin, a.handleLogout)
+	router.POST("/api/v1/rooms/:roomName/actions/advance-and-start", a.requireExternalAPI, a.handleAdvanceAndStart)
 	protected.GET("/api/rooms", a.handleListRooms)
 	protected.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
 	protected.PUT("/api/rooms/:roomName/desired-state", a.requireSameOrigin, a.handleDesiredState)
@@ -263,6 +270,59 @@ func (a *app) handleListRooms(c *gin.Context) {
 type roomsResponse struct {
 	Epoch string     `json:"epoch"`
 	Rooms []roomView `json:"rooms"`
+}
+
+type externalAPIError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type externalAPIErrorResponse struct {
+	Error externalAPIError `json:"error"`
+}
+
+type advanceAndStartResponse struct {
+	RoomName   string `json:"room_name"`
+	MeetingID  string `json:"meeting_id"`
+	Generation uint64 `json:"generation"`
+	Lifecycle  string `json:"lifecycle"`
+	Status     string `json:"status"`
+}
+
+func (a *app) handleAdvanceAndStart(c *gin.Context) {
+	roomName := strings.TrimSpace(c.Param("roomName"))
+	result, err := a.controller.advanceAndStart(c.Request.Context(), roomName)
+	if err == nil {
+		c.JSON(http.StatusAccepted, advanceAndStartResponse{
+			RoomName: roomName, MeetingID: result.MeetingID, Generation: result.Generation,
+			Lifecycle: result.Room.Lifecycle, Status: "accepted",
+		})
+		return
+	}
+	status := http.StatusInternalServerError
+	code := "advance_and_start_failed"
+	var apiErr *rozetaAPIError
+	switch {
+	case errors.Is(err, errUnknownRoom):
+		status, code = http.StatusNotFound, "room_not_found"
+	case errors.Is(err, errCurrentMeetingUnset):
+		status, code = http.StatusConflict, "current_meeting_unset"
+	case errors.Is(err, errCurrentMeetingUnscheduled):
+		status, code = http.StatusConflict, "current_meeting_unscheduled"
+	case errors.Is(err, errNextMeetingNotFound):
+		status, code = http.StatusConflict, "next_meeting_not_found"
+	case errors.Is(err, errRoomStopping):
+		status, code = http.StatusConflict, "room_stopping"
+	case errors.Is(err, errStaleControllerState), errors.Is(err, errGenerationConflict):
+		status, code = http.StatusConflict, "stale_controller_state"
+	case errors.Is(err, errScheduleUnavailable):
+		status, code = http.StatusServiceUnavailable, "schedule_unavailable"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &apiErr):
+		status, code = http.StatusServiceUnavailable, "preflight_unavailable"
+	default:
+		status, code = http.StatusServiceUnavailable, "preflight_unavailable"
+	}
+	c.JSON(status, externalAPIErrorResponse{Error: externalAPIError{Code: code, Message: err.Error()}})
 }
 
 type reconciliationResponse struct {

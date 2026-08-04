@@ -274,7 +274,8 @@ func TestRoomActorIsSerialAndWakeIsCoalesced(t *testing.T) {
 
 	a := newTestApp(t, map[string]string{"room-a": "token-a"})
 	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
-	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	c := newTestController(t, a, statePath)
 	view := updateTestDesired(t, c, "room-a", "meeting-a")
 	_, results, err := c.reconcileLifecycle(a.epoch, "start", []reconciliationTarget{{
 		RoomName: "room-a", ExpectedReconciliationRun: view.ReconciliationRun, ExpectedGeneration: view.Generation,
@@ -337,13 +338,140 @@ func TestRefreshRoomMeetingsEnablesInitialSelectionWithoutOnlineCount(t *testing
 	defer server.Close()
 	a := newTestApp(t, map[string]string{"room-a": "token-a"})
 	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
-	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	c := newTestController(t, a, statePath)
 	view, meetings, err := c.refreshRoomMeetings(context.Background(), "room-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if view.Lifecycle != "suspended" || len(meetings) != 1 || meetings[0].ID != "meeting-a" || len(view.Meetings) != 1 {
 		t.Fatalf("view/meetings = %#v/%#v", view, meetings)
+	}
+}
+
+func TestAdvanceAndStartCommitsNextMeetingAfterCompletePreflight(t *testing.T) {
+	first := time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if request.URL.Path == "/api/v1/meetings/meeting-next" {
+			writeJSON(t, writer, meetingPayload("meeting-next", "ready", 2))
+			return
+		}
+		if request.URL.Path != "/api/v1/meetings" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if request.URL.Query().Get("status") == "in_progress" {
+			writeJSON(t, writer, map[string]any{
+				"data":  []any{meetingPayload("meeting-old", "in_progress", 1)},
+				"links": map[string]any{"next": nil},
+			})
+			return
+		}
+		writeJSON(t, writer, map[string]any{
+			"data": []any{
+				meetingPayload("meeting-current", "ready", 1),
+				meetingPayload("meeting-next", "ready", 2),
+			},
+			"links": map[string]any{"next": nil},
+		})
+	}))
+	defer server.Close()
+
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	c := newTestController(t, a, statePath)
+	c.schedule = meetingSchedule{enabled: true, starts: map[string]time.Time{
+		"meeting-current": first,
+		"meeting-next":    first.Add(time.Hour),
+	}}
+	updateTestDesired(t, c, "room-a", "meeting-current")
+	_, run, generation := activateTestRoom(t, c, "room-a")
+
+	result, err := c.advanceAndStart(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MeetingID != "meeting-next" || result.Generation != generation+1 || result.Room.Lifecycle != "active" {
+		t.Fatalf("advance result = %#v, want active next generation", result)
+	}
+	view := roomViewByName(t, c.snapshotRooms(), "room-a")
+	if view.ReconciliationRun != run || view.DesiredMeetingID != "meeting-next" || view.ResumeConsumed {
+		t.Fatalf("committed room = %#v", view)
+	}
+	file, err := loadDesiredStateFile(statePath)
+	if err != nil || file.Rooms["room-a"].MeetingID != "meeting-next" {
+		t.Fatalf("persisted state = %#v/%v", file, err)
+	}
+}
+
+func TestAdvanceAndStartRejectsStoppingWithoutRemotePreflight(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
+	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	updateTestDesired(t, c, "room-a", "meeting-current")
+	c.mu.Lock()
+	c.rooms["room-a"].lifecycle = reconciliationStopping
+	c.mu.Unlock()
+	if _, err := c.advanceAndStart(context.Background(), "room-a"); !errors.Is(err, errRoomStopping) {
+		t.Fatalf("stopping error = %v", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("remote requests = %d, want none", requests.Load())
+	}
+}
+
+func TestAdvanceAndStartRetriesTransientPreflightFailure(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempt := requests.Add(1)
+		if attempt <= 2 {
+			writer.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if request.URL.Path == "/api/v1/meetings/meeting-next" {
+			writeJSON(t, writer, meetingPayload("meeting-next", "ready", 2))
+			return
+		}
+		data := []any{meetingPayload("meeting-current", "ready", 1), meetingPayload("meeting-next", "ready", 2)}
+		if request.URL.Query().Get("status") == "in_progress" {
+			data = []any{}
+		}
+		writeJSON(t, writer, map[string]any{"data": data, "links": map[string]any{"next": nil}})
+	}))
+	defer server.Close()
+
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
+	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	start := time.Unix(1, 0)
+	c.schedule = meetingSchedule{enabled: true, starts: map[string]time.Time{
+		"meeting-current": start,
+		"meeting-next":    start.Add(time.Hour),
+	}}
+	updateTestDesired(t, c, "room-a", "meeting-current")
+
+	if _, err := c.advanceAndStart(context.Background(), "room-a"); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() < 5 {
+		t.Fatalf("preflight requests = %d, want at least two failed attempts plus three successful reads", requests.Load())
+	}
+	view := roomViewByName(t, c.snapshotRooms(), "room-a")
+	for _, condition := range view.Conditions {
+		if condition.Type == "AdvanceAndStartReady" {
+			t.Fatalf("successful advance retained alert = %#v", condition)
+		}
 	}
 }
 

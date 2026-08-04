@@ -32,6 +32,7 @@ const state = {
 	pendingDesired: null,
 	pendingReconciliation: null,
 	requestPending: false,
+	transientAlert: '',
 }
 
 const roomsBody = document.getElementById('rooms-body')
@@ -163,6 +164,7 @@ function setRooms(rooms, epoch, source) {
 	state.epoch = epoch
 	state.rooms = reconciled.rooms
 	state.meetings = reconciled.meetings
+	state.transientAlert = ''
 	if (epochChanged) {
 		// WHY: revisions restart at zero after a process replacement. The previous UI kept dirty forms and confirmations
 		// from the old process; clearing them prevents those stale fences from being submitted against the new epoch.
@@ -497,7 +499,29 @@ function render() {
 	renderRooms()
 	renderDetails()
 	renderMeetings()
+	renderNotifications()
 	if (roomPickerDialog.open) renderRoomPicker()
+}
+
+function renderNotifications() {
+	// WHY: transient fetch errors disappear on the next snapshot, while advance preflight
+	// failures must remain visible until a later successful advance clears the room condition.
+	const roomAlerts = getSortedRooms().flatMap(room => {
+		const condition = Array.isArray(room.conditions)
+			? room.conditions.find(item => item?.type === 'AdvanceAndStartReady' && item.status === 'False')
+			: null
+		return condition
+			? [
+					`<article class="alert error" role="alert"><div class="alert-copy"><div class="alert-meta"><span class="alert-level">操作告警</span><span class="alert-room">${escapeHtml(room.room_name)}</span></div><p>${escapeHtml(condition.reason || 'Advance preflight failed')}：${escapeHtml(condition.message || '請檢查 controller 狀態。')}</p></div></article>`,
+				]
+			: []
+	})
+	if (state.transientAlert) {
+		roomAlerts.push(
+			`<article class="alert error"><div class="alert-copy"><p>${escapeHtml(state.transientAlert)}</p></div></article>`,
+		)
+	}
+	alerts.innerHTML = roomAlerts.join('')
 }
 
 function renderRooms() {
@@ -778,7 +802,8 @@ async function reconnectAdminSocket(reconnectSequence) {
 }
 
 function showAlert(message) {
-	alerts.innerHTML = `<article class="alert error"><p>${escapeHtml(message)}</p></article>`
+	state.transientAlert = message
+	renderNotifications()
 }
 
 function escapeHtml(value) {

@@ -116,6 +116,22 @@ func (a *app) requireSameOrigin(c *gin.Context) {
 	c.Next()
 }
 
+func (a *app) requireExternalAPI(c *gin.Context) {
+	// WHY: the browser session cookie is intentionally not accepted for machine callers.
+	// Previously there was no external control boundary; this dedicated Bearer check keeps
+	// the destructive advance operation separate from the admin UI authentication flow.
+	const scheme = "Bearer "
+	authorization := c.GetHeader("Authorization")
+	if len(authorization) <= len(scheme) || !strings.EqualFold(authorization[:len(scheme)], scheme) ||
+		!hmac.Equal([]byte(strings.TrimSpace(authorization[len(scheme):])), []byte(a.externalAPIToken)) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, externalAPIErrorResponse{Error: externalAPIError{
+			Code: "authentication_required", Message: "external API authentication is required",
+		}})
+		return
+	}
+	c.Next()
+}
+
 func (a *app) handleLogin(c *gin.Context) {
 	if a.adminAuthenticated(c.Request) {
 		c.Redirect(http.StatusSeeOther, "/")

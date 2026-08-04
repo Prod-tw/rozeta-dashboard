@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -96,6 +98,7 @@ type controllerRoom struct {
 	gotoCondition     reconcileCondition
 	recentActions     []recentAction
 	lastError         string
+	advanceAlert      *reconcileCondition
 	stopDeadline      time.Time
 
 	runCtx    context.Context
@@ -459,7 +462,203 @@ var (
 	errReconciliationNotActive = errors.New("room reconciliation is not active")
 	errDestructiveConfirmation = errors.New("completed desired meeting requires destructive resume confirmation")
 	errPreflightChanged        = errors.New("preflight facts changed; confirmation must be repeated")
+	errRoomStopping            = errors.New("room is stopping")
+	errStaleControllerState    = errors.New("controller state is stale")
+	errCurrentMeetingUnset     = errors.New("current desired meeting is unset")
 )
+
+type advancePreflight struct {
+	meetings []roomMeetingView
+	active   []roomMeetingView
+	desired  roomMeetingView
+}
+
+type advanceResult struct {
+	Room       roomView
+	MeetingID  string
+	Generation uint64
+}
+
+func (c *controller) advanceAndStart(ctx context.Context, roomName string) (advanceResult, error) {
+	// WHY: this operation combines remote preflight, persisted desired state, and lifecycle start.
+	// Previously callers had to perform those steps independently, so a concurrent update could
+	// select the wrong next meeting or start a run from stale remote evidence. The complete
+	// operation now fences its preflight and commit with the room run and desired generation.
+	c.mu.RLock()
+	room, found := c.rooms[roomName]
+	if !found {
+		c.mu.RUnlock()
+		return advanceResult{}, errUnknownRoom
+	}
+	run, generation, currentID := room.reconciliationRun, room.desired.Generation, room.desired.MeetingID
+	lifecycle := room.lifecycle
+	c.mu.RUnlock()
+	if currentID == "" {
+		return advanceResult{}, errCurrentMeetingUnset
+	}
+	if lifecycle == reconciliationStopping {
+		return advanceResult{}, errRoomStopping
+	}
+
+	preflight, next, err := c.advancePreflightWithRetry(ctx, room, run, generation, currentID)
+	if err != nil {
+		return advanceResult{}, err
+	}
+
+	room.dispatchGate.Lock()
+	defer room.dispatchGate.Unlock()
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
+	c.mu.Lock()
+	if room.reconciliationRun != run || room.desired.Generation != generation ||
+		room.desired.MeetingID != currentID || room.lifecycle == reconciliationStopping {
+		c.mu.Unlock()
+		return advanceResult{}, errStaleControllerState
+	}
+	if generation == ^uint64(0) {
+		c.mu.Unlock()
+		return advanceResult{}, errGenerationExhausted
+	}
+	nextDesired := desiredState{MeetingID: next.ID, Generation: generation + 1}
+	candidate := cloneStateFile(c.file)
+	candidate.Rooms[roomName] = nextDesired
+	c.mu.Unlock()
+	if err := writeDesiredState(c.statePath, candidate); err != nil {
+		var committed *committedStateError
+		if !errors.As(err, &committed) {
+			return advanceResult{}, err
+		}
+		c.fatal(err)
+	}
+
+	c.mu.Lock()
+	if room.reconciliationRun != run || room.desired.Generation != generation || room.desired.MeetingID != currentID || room.lifecycle == reconciliationStopping {
+		c.mu.Unlock()
+		return advanceResult{}, errStaleControllerState
+	}
+	room.desired = nextDesired
+	room.resumeAuthorized = 0
+	if next.Status == "completed" {
+		room.resumeAuthorized = nextDesired.Generation
+	}
+	room.meetings = append([]roomMeetingView{}, preflight.meetings...)
+	room.activeMeetingIDs = meetingIDs(preflight.active)
+	room.activeSetStale = false
+	room.desiredStatus = next.Status
+	room.advanceAlert = nil
+	room.lastError = ""
+	room.updatedAt = time.Now().UTC()
+	room.revision++
+	c.file = candidate
+	var runCtx context.Context
+	if room.lifecycle == reconciliationSuspended {
+		if room.reconciliationRun == ^uint64(0) {
+			c.mu.Unlock()
+			return advanceResult{}, errGenerationExhausted
+		}
+		room.reconciliationRun++
+		room.lifecycle = reconciliationStarting
+		room.stopDeadline = time.Time{}
+		room.activeSetStale = true
+		room.summary, room.summaryReason = "Reconciling", "StartingDesiredMeeting"
+		room.conditions = activeConditions(true, false)
+		room.runCtx, room.runCancel = context.WithCancel(c.ctx)
+		run = room.reconciliationRun
+		runCtx = room.runCtx
+		c.wg.Go(func() { c.runRoom(room, run, runCtx) })
+	} else {
+		room.summary, room.summaryReason = summaryForLifecycle(room.lifecycle, next.ID)
+		room.conditions = activeConditions(room.activeSetStale, false)
+	}
+	view := c.snapshotLocked(room)
+	result := advanceResult{Room: view, MeetingID: next.ID, Generation: nextDesired.Generation}
+	active := room.lifecycle != reconciliationSuspended
+	c.mu.Unlock()
+	if active {
+		c.notify(room)
+	}
+	c.publish(view)
+	return result, nil
+}
+
+func (c *controller) advancePreflightWithRetry(ctx context.Context, room *controllerRoom, run, generation uint64, currentID string) (advancePreflight, roomMeetingView, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		preflight, next, err := c.advancePreflight(ctx, room, run, generation, currentID)
+		if err == nil {
+			return preflight, next, nil
+		}
+		lastErr = err
+		if !retryablePreflightError(err) || attempt == 3 {
+			c.setAdvanceAlert(room, run, generation, "AdvancePreflightFailed", err.Error())
+			return advancePreflight{}, roomMeetingView{}, err
+		}
+		c.setAdvanceAlert(room, run, generation, "Retrying", fmt.Sprintf("preflight attempt %d/3 failed: %v", attempt, err))
+		timer := time.NewTimer(time.Duration(1<<(attempt-1)) * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return advancePreflight{}, roomMeetingView{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return advancePreflight{}, roomMeetingView{}, lastErr
+}
+
+func (c *controller) advancePreflight(ctx context.Context, room *controllerRoom, run, generation uint64, currentID string) (advancePreflight, roomMeetingView, error) {
+	c.mu.RLock()
+	if room.reconciliationRun != run || room.desired.Generation != generation || room.desired.MeetingID != currentID || room.lifecycle == reconciliationStopping {
+		c.mu.RUnlock()
+		return advancePreflight{}, roomMeetingView{}, errStaleControllerState
+	}
+	c.mu.RUnlock()
+	meetings, err := c.listMeetings(ctx, room)
+	if err != nil {
+		return advancePreflight{}, roomMeetingView{}, err
+	}
+	next, err := c.schedule.nextMeeting(meetings, currentID)
+	if err != nil {
+		return advancePreflight{}, roomMeetingView{}, err
+	}
+	active, err := c.listActiveMeetings(ctx, room)
+	if err != nil {
+		return advancePreflight{}, roomMeetingView{}, err
+	}
+	desired, err := c.getMeeting(ctx, room, next.ID)
+	if err != nil {
+		return advancePreflight{}, roomMeetingView{}, err
+	}
+	return advancePreflight{meetings: meetings, active: active, desired: desired}, desired, nil
+}
+
+func retryablePreflightError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var apiErr *rozetaAPIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= http.StatusInternalServerError
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
+}
+
+func (c *controller) setAdvanceAlert(room *controllerRoom, run, generation uint64, reason, message string) {
+	c.mu.Lock()
+	if room.reconciliationRun == run && room.desired.Generation == generation && room.lifecycle != reconciliationStopping {
+		room.advanceAlert = &reconcileCondition{Type: "AdvanceAndStartReady", Status: "False", Reason: reason, Message: message}
+		room.lastError = message
+		room.revision++
+		view := c.snapshotLocked(room)
+		c.mu.Unlock()
+		c.publish(view)
+		return
+	}
+	c.mu.Unlock()
+}
 
 func (c *controller) validateTargetsLocked(epoch string, targets []reconciliationTarget) ([]*controllerRoom, error) {
 	if epoch != c.app.epoch || len(targets) == 0 {
@@ -1426,6 +1625,9 @@ func (c *controller) snapshotLocked(room *controllerRoom) roomView {
 	conditions := append([]reconcileCondition{}, room.conditions...)
 	if room.gotoCondition.Type != "" {
 		conditions = append(conditions, room.gotoCondition)
+	}
+	if room.advanceAlert != nil {
+		conditions = append(conditions, *room.advanceAlert)
 	}
 	return roomView{
 		Epoch: c.app.epoch, RoomName: room.name,

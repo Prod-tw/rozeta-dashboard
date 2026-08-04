@@ -12,6 +12,7 @@
 ```sh
 export ADMIN_PASSWORD='replace-with-a-strong-password'
 export SESSION_SECRET='replace-with-at-least-32-random-bytes'
+export EXTERNAL_API_TOKEN='replace-with-a-long-machine-token'
 go run . -account account.csv -session session.csv -state controller-state.json
 ```
 

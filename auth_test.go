@@ -43,6 +43,32 @@ func TestProtectedRouteRequiresAdminSession(t *testing.T) {
 	}
 }
 
+func TestExternalAPIRequiresBearerToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
+	a.externalAPIToken = "external-secret"
+	router := gin.New()
+	router.POST("/api/v1/rooms/:roomName/actions/advance-and-start", a.requireExternalAPI, func(c *gin.Context) {
+		c.Status(http.StatusAccepted)
+	})
+	for _, authorization := range []string{"", "Bearer wrong", "Basic external-secret"} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/room-a/actions/advance-and-start", nil)
+		request.Header.Set("Authorization", authorization)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("authorization %q status = %d, want %d", authorization, recorder.Code, http.StatusUnauthorized)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/room-a/actions/advance-and-start", nil)
+	request.Header.Set("Authorization", "Bearer external-secret")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("valid token status = %d, want %d", recorder.Code, http.StatusAccepted)
+	}
+}
+
 func TestPageAndWebSocketRequireAdminSession(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))

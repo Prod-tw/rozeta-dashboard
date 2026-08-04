@@ -239,6 +239,43 @@ func TestMeetingSchedulePrepareMeetingsFallsBackToTitleAndID(t *testing.T) {
 	}
 }
 
+func TestMeetingScheduleNextMeetingUsesScheduledOrder(t *testing.T) {
+	first := time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)
+	schedule := meetingSchedule{enabled: true, starts: map[string]time.Time{
+		"current": first,
+		"same-a":  first,
+		"same-b":  first,
+		"later":   first.Add(time.Hour),
+	}}
+	meetings := []roomMeetingView{
+		{ID: "later", Title: "Later"},
+		{ID: "current", Title: "A Current"},
+		{ID: "same-b", Title: "Beta"},
+		{ID: "same-a", Title: "Zulu"},
+	}
+
+	next, err := schedule.nextMeeting(meetings, "current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ID != "same-b" {
+		t.Fatalf("next meeting = %#v, want same-b", next)
+	}
+}
+
+func TestMeetingScheduleNextMeetingRejectsUnscheduledOrFinalCurrent(t *testing.T) {
+	schedule := meetingSchedule{enabled: true, starts: map[string]time.Time{
+		"current": time.Unix(1, 0),
+	}}
+	meetings := []roomMeetingView{{ID: "current"}}
+	if _, err := schedule.nextMeeting(meetings, "missing"); !errors.Is(err, errCurrentMeetingUnscheduled) {
+		t.Fatalf("unscheduled error = %v", err)
+	}
+	if _, err := schedule.nextMeeting(meetings, "current"); !errors.Is(err, errNextMeetingNotFound) {
+		t.Fatalf("final error = %v", err)
+	}
+}
+
 func writeSessionCSV(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "session.csv")
