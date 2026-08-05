@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="theme-color" content="#f4f5f2" />
+		<title>快速設定 | COSCUP</title>
+		<link rel="stylesheet" href="/assets/styles.css" />
+		<link rel="stylesheet" href="/assets/setup.css" />
+	</head>
+	<body class="setup-page">
+		<main class="setup-shell">
+			<header class="setup-header">
+				<p class="eyebrow">COSCUP / ROZETA</p>
+				<h1>快速設定</h1>
+				<p>選擇房間，產生 Rozeta 登入 Script 與 OBS 內嵌網址。</p>
+			</header>
+
+			<section class="setup-card" aria-labelledby="room-title">
+				<div class="section-heading">
+					<div>
+						<p class="section-kicker">STEP 01</p>
+						<h2 id="room-title">選擇房間</h2>
+					</div>
+					<a class="text-link" href="/">回到主控台</a>
+				</div>
+				<label class="setup-field">
+					<span>房間</span>
+					<select id="room-select" disabled>
+						<option value="">載入房間中...</option>
+					</select>
+				</label>
+				<p class="setup-note" id="meeting-preview">選擇房間後，會使用該房間排序後的第一個議程。</p>
+				<button type="button" class="primary-button" id="generate-button" disabled>產生設定</button>
+				<p class="setup-error" id="setup-error" role="alert"></p>
+			</section>
+
+			<section class="setup-card results-card" id="results" hidden aria-labelledby="results-title">
+				<div class="section-heading">
+					<div>
+						<p class="section-kicker">STEP 02</p>
+						<h2 id="results-title">設定結果</h2>
+					</div>
+					<span class="result-room" id="result-room"></span>
+				</div>
+				<div class="output-block">
+					<div class="output-heading">
+						<h3>Rozeta Console Script</h3>
+						<button type="button" class="secondary-button copy-button" data-copy-target="cookie-script">
+							複製
+						</button>
+					</div>
+					<textarea id="cookie-script" readonly spellcheck="false"></textarea>
+					<p>將這段 Script 貼到 Rozeta Console 執行，執行後會前往 Rozeta meetings 頁面。</p>
+				</div>
+				<div class="output-block">
+					<div class="output-heading">
+						<h3>OBS 內嵌網址</h3>
+						<button
+							type="button"
+							class="secondary-button copy-button"
+							id="copy-obs-button"
+							data-copy-target="obs-url"
+						>
+							複製
+						</button>
+					</div>
+					<textarea id="obs-url" readonly spellcheck="false" placeholder="此房間沒有議程"></textarea>
+					<p>將完整網址貼到 OBS Browser Source。</p>
+				</div>
+				<p class="copy-status" id="copy-status" role="status"></p>
+			</section>
+		</main>
+		<script src="/assets/setup.js" type="module"></script>
+	</body>
+</html>

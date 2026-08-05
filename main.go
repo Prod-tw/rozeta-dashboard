@@ -204,17 +204,20 @@ func (a *app) router() (*gin.Engine, error) {
 	// admin middleware. Serving only the public CSS and script allowlist keeps the
 	// authenticated page itself behind requireAdmin.
 	router.GET("/assets/:name", a.handleAsset)
+	router.GET("/favicon.ico", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	router.GET("/login", a.handleLogin)
 	router.POST("/api/login", a.requireSameOrigin, a.handleLoginRequest)
 
 	protected := router.Group("/")
 	protected.Use(a.requireAdmin)
 	protected.GET("/", a.handleIndex)
+	protected.GET("/setup", a.handleSetup)
 	protected.GET("/debug", a.handleDebug)
 	protected.POST("/api/logout", a.requireSameOrigin, a.handleLogout)
 	router.GET("/api/v1/rooms/:roomName/in-progress", a.handleCurrentMeeting)
 	router.POST("/api/v1/rooms/:roomName/actions/advance-and-start", a.requireExternalAPI, a.handleAdvanceAndStart)
 	protected.GET("/api/rooms", a.handleListRooms)
+	protected.POST("/api/setup/artifacts", a.requireSameOrigin, a.handleSetupArtifacts)
 	protected.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
 	protected.PUT("/api/rooms/:roomName/desired-state", a.requireSameOrigin, a.handleDesiredState)
 	protected.POST("/api/rooms/:roomName/reconciliation/:action/preflight", a.requireSameOrigin, a.handleRoomReconciliationPreflight)
@@ -264,6 +267,8 @@ func (a *app) handleAsset(c *gin.Context) {
 		"control.js":  "text/javascript; charset=utf-8",
 		"control.css": "text/css; charset=utf-8",
 		"login.js":    "text/javascript; charset=utf-8",
+		"setup.css":   "text/css; charset=utf-8",
+		"setup.js":    "text/javascript; charset=utf-8",
 		"styles.css":  "text/css; charset=utf-8",
 		"tooltips.js": "text/javascript; charset=utf-8",
 		"state.js":    "text/javascript; charset=utf-8",
@@ -284,6 +289,10 @@ func (a *app) handleAsset(c *gin.Context) {
 
 func (a *app) handleIndex(c *gin.Context) {
 	a.handlePage(c, "index.html")
+}
+
+func (a *app) handleSetup(c *gin.Context) {
+	a.handlePage(c, "setup.html")
 }
 
 func (a *app) handleDebug(c *gin.Context) {
@@ -310,6 +319,51 @@ func (a *app) handleListRooms(c *gin.Context) {
 type roomsResponse struct {
 	Epoch string     `json:"epoch"`
 	Rooms []roomView `json:"rooms"`
+}
+
+type setupRequest struct {
+	RoomName string `json:"room_name"`
+}
+
+type setupResponse struct {
+	RoomName     string `json:"room_name"`
+	MeetingID    string `json:"meeting_id,omitempty"`
+	CookieScript string `json:"cookie_script"`
+	OBSURL       string `json:"obs_url,omitempty"`
+}
+
+func (a *app) handleSetupArtifacts(c *gin.Context) {
+	var request setupRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid setup request"})
+		return
+	}
+	roomName := strings.TrimSpace(request.RoomName)
+	token, found := a.tokenStore[roomName]
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown room"})
+		return
+	}
+
+	var meetingID string
+	if a.controller != nil {
+		for _, room := range a.controller.snapshotRooms() {
+			if room.RoomName == roomName && len(room.Meetings) > 0 {
+				meetingID = room.Meetings[0].ID
+				break
+			}
+		}
+	}
+
+	// WHY: setup results are deliberately generated only for the selected room, rather
+	// than exposing every account token through the room list or a bulk response.
+	cookieScript := "(() => {\n\tdocument.cookie = " + strconv.Quote("auth_token="+token+"; Path=/; Secure; SameSite=Lax") + "\n\twindow.location.assign(" + strconv.Quote("https://rozeta.app/en/meetings") + ")\n})()"
+	response := setupResponse{RoomName: roomName, MeetingID: meetingID, CookieScript: cookieScript}
+	if meetingID != "" {
+		query := url.Values{"clientId": {"obs"}, "token": {token}}
+		response.OBSURL = a.rozetaURL("/api/web/meetings/" + url.PathEscape(meetingID) + "/embed?" + query.Encode())
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 type externalAPIError struct {

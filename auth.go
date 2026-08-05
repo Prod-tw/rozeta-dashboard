@@ -134,7 +134,7 @@ func (a *app) requireExternalAPI(c *gin.Context) {
 
 func (a *app) handleLogin(c *gin.Context) {
 	if a.adminAuthenticated(c.Request) {
-		c.Redirect(http.StatusSeeOther, "/")
+		c.Redirect(http.StatusSeeOther, safeRedirectPath(c.Query("redirect")))
 		return
 	}
 	data, err := webAssets.ReadFile("web/login.html")
@@ -156,6 +156,7 @@ func (a *app) handleLoginRequest(c *gin.Context) {
 
 	var request struct {
 		Password string `json:"password"`
+		Redirect string `json:"redirect"`
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -185,7 +186,19 @@ func (a *app) handleLoginRequest(c *gin.Context) {
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
-	c.JSON(http.StatusOK, gin.H{"status": "authenticated"})
+	c.JSON(http.StatusOK, gin.H{"status": "authenticated", "redirect": safeRedirectPath(request.Redirect)})
+}
+
+func safeRedirectPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.ContainsAny(value, "\\\r\n") {
+		return "/"
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") {
+		return "/"
+	}
+	return value
 }
 
 func (a *app) handleLogout(c *gin.Context) {

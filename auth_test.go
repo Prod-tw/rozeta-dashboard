@@ -108,6 +108,7 @@ func TestPageAndWebSocketRequireAdminSession(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "admin page redirects", path: "/", wantStatus: http.StatusSeeOther},
+		{name: "setup page redirects", path: "/setup", wantStatus: http.StatusSeeOther},
 		{name: "websocket rejects", path: "/ws/admin", wantStatus: http.StatusUnauthorized},
 	}
 	for _, test := range tests {
@@ -136,6 +137,9 @@ func TestPublicAssetAllowlist(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "tooltip script is public", path: "/assets/tooltips.js", wantStatus: http.StatusOK},
+		{name: "setup script is public", path: "/assets/setup.js", wantStatus: http.StatusOK},
+		{name: "setup stylesheet is public", path: "/assets/setup.css", wantStatus: http.StatusOK},
+		{name: "missing favicon is empty", path: "/favicon.ico", wantStatus: http.StatusNoContent},
 		{name: "embedded admin page stays protected", path: "/assets/index.html", wantStatus: http.StatusNotFound},
 	}
 	for _, test := range tests {
@@ -169,6 +173,105 @@ func TestLoginCreatesSecureFixedSession(t *testing.T) {
 		if !strings.Contains(setCookie, attribute) {
 			t.Errorf("Set-Cookie = %q, missing %q", setCookie, attribute)
 		}
+	}
+}
+
+func TestLoginUsesSafeRedirect(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
+	router, err := a.router()
+	if err != nil {
+		t.Fatalf("router() error = %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		redirect string
+		want     string
+	}{
+		{name: "requested local page", redirect: "/setup", want: "/setup"},
+		{name: "missing redirect", want: "/"},
+		{name: "external redirect", redirect: "https://example.com", want: "/"},
+		{name: "protocol relative redirect", redirect: "//example.com", want: "/"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requestBody := `{"password":"password"}`
+			if test.redirect != "" {
+				requestBody = `{"password":"password","redirect":"` + test.redirect + `"}`
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(requestBody))
+			request.Header.Set("content-type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+			}
+			if !strings.Contains(recorder.Body.String(), `"redirect":"`+test.want+`"`) {
+				t.Fatalf("body = %s, want redirect %q", recorder.Body.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestSetupArtifactsUseFirstRoomMeeting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
+	a.controller = &controller{
+		app: a,
+		rooms: map[string]*controllerRoom{
+			"room-a": {
+				name:     "room-a",
+				meetings: []roomMeetingView{{ID: "meeting-first"}, {ID: "meeting-second"}},
+			},
+		},
+	}
+	router, err := a.router()
+	if err != nil {
+		t.Fatalf("router() error = %v", err)
+	}
+	session, err := a.newAdminSession(time.Now().UTC())
+	if err != nil {
+		t.Fatalf("newAdminSession() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/setup/artifacts", strings.NewReader(`{"room_name":"room-a"}`))
+	request.Header.Set("content-type", "application/json")
+	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: session})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, expected := range []string{
+		`"meeting_id":"meeting-first"`,
+		`auth_token=token-a`,
+		`https://rozeta.app/api/web/meetings/meeting-first/embed?clientId=obs\u0026token=token-a`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("body = %s, missing %q", body, expected)
+		}
+	}
+	if strings.Contains(body, "meeting-second") {
+		t.Fatalf("body = %s, included a non-first meeting", body)
+	}
+}
+
+func TestSetupArtifactsAllowRoomWithoutMeetings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
+	a.controller = &controller{app: a, rooms: map[string]*controllerRoom{"room-a": {name: "room-a"}}}
+	request := httptest.NewRequest(http.MethodPost, "/api/setup/artifacts", strings.NewReader(`{"room_name":"room-a"}`))
+	request.Header.Set("content-type", "application/json")
+	recorder := httptest.NewRecorder()
+	ginContext := gin.CreateTestContextOnly(recorder, gin.New())
+	ginContext.Request = request
+	a.handleSetupArtifacts(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if strings.Contains(recorder.Body.String(), "obs") {
+		t.Fatalf("body = %s, want no OBS URL", recorder.Body.String())
 	}
 }
 
