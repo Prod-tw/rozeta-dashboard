@@ -472,6 +472,13 @@ a {
 	min-width: 0;
 }
 
+.room-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
 .room-card h3,
 .room-meta,
 .agenda-summary strong {

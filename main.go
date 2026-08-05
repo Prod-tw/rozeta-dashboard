@@ -223,6 +223,8 @@ func (a *app) router() (*gin.Engine, error) {
 	protected.POST("/api/rooms/:roomName/reconciliation/:action/preflight", a.requireSameOrigin, a.handleRoomReconciliationPreflight)
 	protected.POST("/api/rooms/:roomName/observe", a.requireSameOrigin, a.handleObserveRoom)
 	protected.POST("/api/rooms/:roomName/reconciliation/:action", a.requireSameOrigin, a.handleRoomReconciliation)
+	protected.POST("/api/rooms/:roomName/reset-ready/preflight", a.requireSameOrigin, a.handleResetReadyPreflight)
+	protected.POST("/api/rooms/:roomName/reset-ready", a.requireSameOrigin, a.handleResetReady)
 	protected.POST("/api/reconciliation/:action/preflight", a.requireSameOrigin, a.handleBulkReconciliationPreflight)
 	protected.POST("/api/reconciliation/:action", a.requireSameOrigin, a.handleBulkReconciliation)
 	protected.GET("/ws/admin", a.handleAdminWS)
@@ -815,6 +817,8 @@ type roomView struct {
 	ActiveMeetingIDs  []string             `json:"active_meeting_ids"`
 	ActiveObservedAt  time.Time            `json:"active_observed_at,omitempty,omitzero"`
 	ActiveSetStale    bool                 `json:"active_set_stale"`
+	ResetReady        bool                 `json:"reset_ready"`
+	Resetting         bool                 `json:"resetting"`
 	Summary           string               `json:"summary"`
 	SummaryReason     string               `json:"summary_reason"`
 	Conditions        []reconcileCondition `json:"conditions"`

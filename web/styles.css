@@ -493,6 +493,12 @@ tbody tr:focus-visible {
 	white-space: nowrap;
 }
 
+.reset-action {
+	margin-top: 6px;
+	background: rgba(245, 158, 11, 0.16);
+	color: #fcd34d;
+}
+
 .stale-observation {
 	color: #fcd34d;
 	font-size: 0.86rem;

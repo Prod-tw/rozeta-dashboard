@@ -80,26 +80,30 @@ type controllerRoom struct {
 	// dispatchGate linearizes lifecycle/spec mutations with command reservation.
 	// It is never held across HTTP I/O or while waiting for the global scheduler.
 	dispatchGate sync.Mutex
+	// resetMu prevents desired-state changes from racing the destructive reset of this room.
+	resetMu sync.Mutex
 
-	desired           desiredState
-	resumeAuthorized  uint64
-	meetings          []roomMeetingView
-	activeMeetingIDs  []string
-	desiredStatus     string
-	activeObservedAt  time.Time
-	activeSetStale    bool
-	lifecycle         reconciliationState
-	reconciliationRun uint64
-	revision          uint64
-	updatedAt         time.Time
-	summary           string
-	summaryReason     string
-	conditions        []reconcileCondition
-	gotoCondition     reconcileCondition
-	recentActions     []recentAction
-	lastError         string
-	advanceAlert      *reconcileCondition
-	stopDeadline      time.Time
+	desired                 desiredState
+	resumeAuthorized        uint64
+	meetings                []roomMeetingView
+	activeMeetingIDs        []string
+	desiredStatus           string
+	activeObservedAt        time.Time
+	activeSetStale          bool
+	activeSetConfirmedEmpty bool
+	lifecycle               reconciliationState
+	reconciliationRun       uint64
+	revision                uint64
+	updatedAt               time.Time
+	summary                 string
+	summaryReason           string
+	conditions              []reconcileCondition
+	gotoCondition           reconcileCondition
+	recentActions           []recentAction
+	lastError               string
+	advanceAlert            *reconcileCondition
+	stopDeadline            time.Time
+	resetting               bool
 
 	runCtx    context.Context
 	runCancel context.CancelFunc
@@ -225,6 +229,7 @@ type controller struct {
 	scheduler      *requestScheduler
 	stopTimeout    time.Duration
 	controlTimeout time.Duration
+	resetSlots     chan struct{}
 
 	mu      sync.RWMutex
 	storeMu sync.Mutex
@@ -249,6 +254,7 @@ func newController(parent context.Context, app *app, tokens map[string]string, s
 		app: app, statePath: statePath, schedule: schedule, ctx: ctx, cancel: cancel,
 		rooms: make(map[string]*controllerRoom, len(tokens)), file: file,
 		stopTimeout: stopDrainTimeout, controlTimeout: reconcileRequestTimeout,
+		resetSlots: make(chan struct{}, 2),
 	}
 	controller.fatal = func(err error) { log.Fatalf("controller state durability failure: %v", err) }
 	controller.scheduler = newRequestScheduler(ctx)
@@ -490,6 +496,10 @@ func (c *controller) advanceAndStart(ctx context.Context, roomName string) (adva
 		c.mu.RUnlock()
 		return advanceResult{}, errUnknownRoom
 	}
+	c.mu.RUnlock()
+	room.resetMu.Lock()
+	defer room.resetMu.Unlock()
+	c.mu.RLock()
 	run, generation, currentID := room.reconciliationRun, room.desired.Generation, room.desired.MeetingID
 	lifecycle := room.lifecycle
 	c.mu.RUnlock()
@@ -841,7 +851,7 @@ func (c *controller) roomLifecycleByName(roomName string) reconciliationState {
 func (c *controller) applyLifecycleLocked(room *controllerRoom, action string) bool {
 	switch action {
 	case "start":
-		if room.lifecycle != reconciliationSuspended || room.reconciliationRun == ^uint64(0) {
+		if room.lifecycle != reconciliationSuspended || room.reconciliationRun == ^uint64(0) || room.resetting {
 			return false
 		}
 		room.reconciliationRun++
@@ -849,6 +859,7 @@ func (c *controller) applyLifecycleLocked(room *controllerRoom, action string) b
 		room.resumeAuthorized = room.desired.Generation
 		room.stopDeadline = time.Time{}
 		room.activeSetStale = true
+		room.activeSetConfirmedEmpty = false
 		room.summary, room.summaryReason = "Reconciling", "StartingDesiredMeeting"
 		room.conditions = activeConditions(true, false)
 		room.runCtx, room.runCancel = context.WithCancel(c.ctx)
@@ -862,6 +873,7 @@ func (c *controller) applyLifecycleLocked(room *controllerRoom, action string) b
 		}
 		room.lifecycle = reconciliationStopping
 		room.resumeAuthorized = 0
+		room.activeSetConfirmedEmpty = false
 		// The previous timer began only when the actor next noticed stopping, so an
 		// in-flight request could extend force-stop beyond 30 seconds. Anchor it to
 		// the instant Stop is accepted instead.
@@ -1038,6 +1050,7 @@ func (c *controller) reconcileStop(room *controllerRoom, run, generation uint64,
 		room.lifecycle = reconciliationSuspended
 		room.stopDeadline = time.Time{}
 		room.activeSetStale = true
+		room.activeSetConfirmedEmpty = true
 		room.summary, room.summaryReason = "Suspended", "LastStopConfirmedEmpty"
 		room.conditions = suspendedConditions()
 		room.revision++
@@ -1129,6 +1142,7 @@ func (c *controller) forceStopLocked(room *controllerRoom) {
 	room.resumeAuthorized = 0
 	room.stopDeadline = time.Time{}
 	room.activeSetStale = true
+	room.activeSetConfirmedEmpty = false
 	room.summary, room.summaryReason = "Suspended", "RemoteOutcomeUnknown"
 	room.conditions = suspendedConditions()
 	room.lastError = "remote outcome of cancelled work is unknown"
@@ -1146,6 +1160,10 @@ func (c *controller) updateDesired(roomName string, update desiredStateUpdate) (
 		c.mu.RUnlock()
 		return roomView{}, errUnknownRoom
 	}
+	c.mu.RUnlock()
+	room.resetMu.Lock()
+	defer room.resetMu.Unlock()
+	c.mu.RLock()
 	if update.ExpectedEpoch != c.app.epoch || room.reconciliationRun != update.ExpectedRun || room.desired.Generation != update.ExpectedGeneration {
 		view := c.snapshotLocked(room)
 		c.mu.RUnlock()
@@ -1154,7 +1172,6 @@ func (c *controller) updateDesired(roomName string, update desiredStateUpdate) (
 	current := room.desired
 	lifecycle := room.lifecycle
 	c.mu.RUnlock()
-
 	if lifecycle == reconciliationStopping {
 		return roomView{}, errReconciliationNotActive
 	}
@@ -1541,6 +1558,7 @@ func (c *controller) applyActiveObservation(room *controllerRoom, run, generatio
 	room.activeMeetingIDs = meetingIDs(meetings)
 	room.activeObservedAt = time.Now().UTC()
 	room.activeSetStale = false
+	room.activeSetConfirmedEmpty = len(meetings) == 0
 	if room.desired.MeetingID != "" && containsMeeting(meetings, room.desired.MeetingID) {
 		room.desiredStatus = "in_progress"
 	} else if room.desiredStatus == "in_progress" {
@@ -1761,7 +1779,9 @@ func (c *controller) snapshotLocked(room *controllerRoom) roomView {
 		Lifecycle: string(room.lifecycle), ReconciliationRun: room.reconciliationRun,
 		ActiveMeetingIDs: append([]string{}, room.activeMeetingIDs...),
 		ActiveObservedAt: room.activeObservedAt, ActiveSetStale: room.activeSetStale || room.lifecycle == reconciliationSuspended,
-		Summary: room.summary, SummaryReason: room.summaryReason,
+		ResetReady: room.lifecycle == reconciliationSuspended && room.activeSetConfirmedEmpty,
+		Resetting:  room.resetting,
+		Summary:    room.summary, SummaryReason: room.summaryReason,
 		Conditions: conditions, RecentActions: append([]recentAction{}, room.recentActions...),
 		LastError: room.lastError, Meetings: append([]roomMeetingView{}, room.meetings...), UpdatedAt: room.updatedAt,
 	}

@@ -36,6 +36,9 @@ const state = {
 	pendingReconciliation: null,
 	requestPending: false,
 	transientAlert: '',
+	pendingReset: null,
+	resettingRooms: new Set(),
+	resetProbeRooms: new Set(),
 }
 
 const roomsBody = document.getElementById('rooms-body')
@@ -97,6 +100,13 @@ desiredConfirmationDialog.addEventListener('close', () => {
 	state.pendingDesired = null
 })
 reconciliationConfirm.addEventListener('click', () => {
+	const reset = state.pendingReset
+	if (reset) {
+		reconciliationDialog.close()
+		state.pendingReset = null
+		void sendReset(reset)
+		return
+	}
 	const intent = state.pendingReconciliation
 	reconciliationDialog.close()
 	state.pendingReconciliation = null
@@ -104,6 +114,7 @@ reconciliationConfirm.addEventListener('click', () => {
 })
 reconciliationDialog.addEventListener('close', () => {
 	state.pendingReconciliation = null
+	state.pendingReset = null
 })
 
 async function apiFetch(url, options, acceptedStatuses = []) {
@@ -137,6 +148,36 @@ async function loadRooms() {
 	if (!state.selectedRoom) {
 		const firstVisibleRoom = getVisibleRooms()[0]
 		if (firstVisibleRoom) void selectRoom(firstVisibleRoom.room_name)
+	}
+	render()
+	void probeResetReadiness()
+}
+
+async function probeResetReadiness() {
+	for (const room of getVisibleRooms()) {
+		if (room.lifecycle !== 'suspended' || room.reset_ready || state.resetProbeRooms.has(room.room_name)) continue
+		state.resetProbeRooms.add(room.room_name)
+		try {
+			const response = await apiFetch(
+				`/api/rooms/${encodeURIComponent(room.room_name)}/reset-ready/preflight`,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						epoch: state.epoch,
+						expected_reconciliation_run: Number(room.reconciliation_run || 0),
+						expected_generation: Number(room.generation || 0),
+					}),
+				},
+				[409],
+			)
+			const body = await response.json().catch(() => ({}))
+			if (body.room) setRoom(body.room, body.epoch || state.epoch)
+		} catch (error) {
+			if (!error.authentication) showAlert(error instanceof Error ? error.message : String(error))
+		} finally {
+			state.resetProbeRooms.delete(room.room_name)
+		}
 	}
 	render()
 }
@@ -555,13 +596,15 @@ function renderRooms() {
 		.map(room => {
 			const action = reconciliationActionFor(room)
 			const actionLabel = { start: '開始', stop: '停止', 'force-stop': '強制停止' }[action] || ''
+			const resetVisible = room.lifecycle === 'suspended'
+			const resetDisabled = state.resettingRooms.has(room.room_name) || !room.reset_ready
 			return `<tr class="${room.room_name === state.selectedRoom ? 'selected' : ''}" data-room="${escapeHtml(room.room_name)}" tabindex="0">
 				<td>${escapeHtml(room.room_name)}</td>
 				<td><span class="status ${escapeHtml(room.lifecycle || 'unknown')}">${escapeHtml(room.lifecycle || 'unknown')}</span><small class="run-number">run ${Number(room.reconciliation_run || 0)} / gen ${Number(room.generation || 0)}</small></td>
 				<td>${escapeHtml(room.desired_meeting_id || 'InitialMeetingRequired')}<small class="run-number">${escapeHtml(room.desired_status || 'status unknown')}</small></td>
 				<td>${escapeHtml(formatIDs(room.active_meeting_ids))}<small class="run-number ${room.active_set_stale ? 'stale-observation' : ''}">${room.active_set_stale ? 'stale / ' : 'fresh / '}${escapeHtml(formatTime(room.active_observed_at))}</small></td>
 				<td><strong>${escapeHtml(room.summary || 'Unknown')}</strong><small class="run-number">${escapeHtml(room.summary_reason || '—')}</small></td>
-				<td>${action ? `<button type="button" class="row-action ${action === 'force-stop' ? 'danger-action' : ''}" data-reconciliation-room="${escapeHtml(room.room_name)}" ${state.requestPending ? 'disabled' : ''}>${actionLabel}</button>` : '—'}</td>
+				<td>${action ? `<button type="button" class="row-action ${action === 'force-stop' ? 'danger-action' : ''}" data-reconciliation-room="${escapeHtml(room.room_name)}" ${state.requestPending ? 'disabled' : ''}>${actionLabel}</button>` : ''}${resetVisible ? `<button type="button" class="row-action reset-action" data-reset-room="${escapeHtml(room.room_name)}" ${resetDisabled ? 'disabled' : ''}>${state.resettingRooms.has(room.room_name) ? '重置中' : '重置 Ready'}</button>` : !action ? '—' : ''}</td>
 			</tr>`
 		})
 		.join('')
@@ -577,6 +620,107 @@ function renderRooms() {
 			void beginRoomReconciliation(button.dataset.reconciliationRoom)
 		}),
 	)
+	roomsBody.querySelectorAll('[data-reset-room]').forEach(button =>
+		button.addEventListener('click', event => {
+			event.stopPropagation()
+			void openReset(button.dataset.resetRoom)
+		}),
+	)
+}
+
+async function openReset(roomName) {
+	const room = state.rooms.get(roomName)
+	if (!room || room.lifecycle !== 'suspended' || !room.reset_ready || state.resettingRooms.has(roomName)) return
+	try {
+		const response = await apiFetch(
+			`/api/rooms/${encodeURIComponent(roomName)}/reset-ready/preflight`,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					epoch: state.epoch,
+					expected_reconciliation_run: Number(room.reconciliation_run || 0),
+					expected_generation: Number(room.generation || 0),
+				}),
+			},
+			[409],
+		)
+		const body = await response.json().catch(() => ({}))
+		if (body.room) setRoom(body.room, body.epoch || state.epoch)
+		if (response.status === 409) {
+			showAlert(body.error || '房間目前無法重置，請重新觀測。')
+			return
+		}
+		const meetings = Array.isArray(body.meetings) ? body.meetings : []
+		state.pendingReset = {
+			roomName,
+			epoch: state.epoch,
+			expectedRun: Number(room.reconciliation_run || 0),
+			expectedGeneration: Number(room.generation || 0),
+			meetingIDs: meetings.map(meeting => meeting.meeting_id),
+			meetings,
+		}
+		document.getElementById('reconciliation-dialog-eyebrow').textContent = '破壞性操作'
+		document.getElementById('reconciliation-dialog-title').textContent = `重置 ${roomName} 的所有議程？`
+		document.getElementById('reconciliation-dialog-copy').textContent =
+			'重置會永久刪除 paused 與 completed 議程的逐字稿及翻譯；ready 議程不會變更。'
+		document.getElementById('reconciliation-dialog-rooms').innerHTML =
+			meetings
+				.map(
+					meeting =>
+						`<article class="preflight-room"><strong>${escapeHtml(meeting.meeting_id)}</strong><span>${escapeHtml(meeting.status)} / ${escapeHtml(meeting.action)}</span></article>`,
+				)
+				.join('') || '<article class="preflight-room"><span>此房間沒有可重置的議程。</span></article>'
+		reconciliationConfirm.disabled = false
+		reconciliationConfirm.textContent = '確認重置'
+		reconciliationConfirm.className = 'danger-action'
+		reconciliationDialog.showModal()
+	} catch (error) {
+		showAlert(error instanceof Error ? error.message : String(error))
+	}
+}
+
+async function sendReset(intent) {
+	if (state.resettingRooms.has(intent.roomName)) return
+	state.resettingRooms.add(intent.roomName)
+	render()
+	try {
+		const response = await apiFetch(
+			`/api/rooms/${encodeURIComponent(intent.roomName)}/reset-ready`,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					epoch: intent.epoch,
+					expected_reconciliation_run: intent.expectedRun,
+					expected_generation: intent.expectedGeneration,
+					meeting_ids: intent.meetingIDs,
+					confirmed: true,
+				}),
+			},
+			[409],
+		)
+		const body = await response.json().catch(() => ({}))
+		if (body.room) setRoom(body.room, body.epoch || state.epoch)
+		if (response.status === 409) {
+			showAlert(body.error || '房間狀態已改變，請重新觀測後再試。')
+			return
+		}
+		const results = Array.isArray(body.results) ? body.results : []
+		const failed = results.filter(result => result.outcome === 'failed')
+		addMessage(
+			failed.length ? 'error' : 'info',
+			intent.roomName,
+			`Ready 重置完成：${results.length - failed.length} 成功，${failed.length} 失敗`,
+		)
+		if (failed.length)
+			showAlert(failed.map(result => `${result.meeting_id}: ${result.error || '重置失敗'}`).join('；'))
+	} catch (error) {
+		showAlert(error instanceof Error ? error.message : String(error))
+	} finally {
+		state.resettingRooms.delete(intent.roomName)
+		render()
+	}
 }
 
 function loadRoomVisibility() {

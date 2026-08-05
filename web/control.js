@@ -25,6 +25,9 @@ const state = {
 	roomPickerDraft: new Set(),
 	roomVisibilityConfigured: false,
 	pendingAction: null,
+	pendingReset: null,
+	resettingRooms: new Set(),
+	resetProbeRooms: new Set(),
 	pendingAgenda: null,
 	requestPending: false,
 	connected: false,
@@ -65,6 +68,10 @@ document.getElementById('agenda-confirm').addEventListener('click', () => void c
 document.getElementById('start-all').addEventListener('click', () => void openBulkAction('start'))
 document.getElementById('stop-all').addEventListener('click', () => void openBulkAction('stop'))
 document.getElementById('force-stop-all').addEventListener('click', () => void openBulkAction('force-stop'))
+actionDialog.addEventListener('close', () => {
+	state.pendingAction = null
+	state.pendingReset = null
+})
 roomSearch.addEventListener('input', renderRooms)
 eventDaySelect.addEventListener('change', () => {
 	state.selectedDate = eventDaySelect.value
@@ -101,6 +108,36 @@ async function loadRooms() {
 	const body = await response.json()
 	applyRooms(body.rooms || [], body.epoch, 'http')
 	ensureOperationRoom()
+	render()
+	void probeResetReadiness()
+}
+
+async function probeResetReadiness() {
+	for (const room of getVisibleRooms()) {
+		if (room.lifecycle !== 'suspended' || room.reset_ready || state.resetProbeRooms.has(room.room_name)) continue
+		state.resetProbeRooms.add(room.room_name)
+		try {
+			const response = await apiFetch(
+				`/api/rooms/${encodeURIComponent(room.room_name)}/reset-ready/preflight`,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						epoch: state.epoch,
+						expected_reconciliation_run: Number(room.reconciliation_run || 0),
+						expected_generation: Number(room.generation || 0),
+					}),
+				},
+				[409],
+			)
+			const body = await response.json().catch(() => ({}))
+			if (body.room) applyRoom(body.room)
+		} catch (error) {
+			if (!error.authentication) showToast(error.message || String(error))
+		} finally {
+			state.resetProbeRooms.delete(room.room_name)
+		}
+	}
 	render()
 }
 
@@ -220,15 +257,20 @@ function renderRooms() {
 				() => void openRoomAction(button.dataset.roomAction, button.dataset.roomName),
 			),
 		)
+	roomGrid
+		.querySelectorAll('[data-room-reset]')
+		.forEach(button => button.addEventListener('click', () => void openRoomReset(button.dataset.roomReset)))
 }
 
 function roomCardMarkup(room) {
 	const action = reconciliationActionFor(room)
 	const actionLabel = { start: '開始教室', stop: '停止教室', 'force-stop': '強制停止' }[action]
 	const actionClass = action === 'force-stop' ? 'danger-button' : 'primary-button'
+	const resetVisible = room.lifecycle === 'suspended'
+	const resetDisabled = room.resetting || state.resettingRooms.has(room.room_name) || !room.reset_ready
 	return `<article class="room-card">
 		<div class="room-card-header"><div><h3>${escapeHtml(room.room_name)}</h3><p class="room-meta">目前議程：${escapeHtml(room.desired_meeting_id ? meetingTitle(room.room_name, room.desired_meeting_id) : '尚未設定')}</p></div><span class="status-label ${statusClass(room)}">${escapeHtml(translateLifecycle(room.lifecycle))}</span></div>
-		<div class="room-card-footer"><div><p class="room-meta">${escapeHtml(room.summary || '等待伺服器狀態')}</p>${room.last_error ? `<p class="room-meta error-copy">${escapeHtml(room.last_error)}</p>` : ''}</div>${action ? `<button type="button" class="room-action ${actionClass}" data-room-action="${action}" data-room-name="${escapeAttr(room.room_name)}" ${state.requestPending || !state.connected ? 'disabled' : ''}>${actionLabel}</button>` : '<span class="room-meta">處理中</span>'}</div>
+		<div class="room-card-footer"><div><p class="room-meta">${escapeHtml(room.summary || '等待伺服器狀態')}</p>${room.last_error ? `<p class="room-meta error-copy">${escapeHtml(room.last_error)}</p>` : ''}</div><div class="room-card-actions">${action ? `<button type="button" class="room-action ${actionClass}" data-room-action="${action}" data-room-name="${escapeAttr(room.room_name)}" ${state.requestPending || !state.connected ? 'disabled' : ''}>${actionLabel}</button>` : '<span class="room-meta">處理中</span>'}${resetVisible ? `<button type="button" class="room-action danger-button" data-room-reset="${escapeAttr(room.room_name)}" ${resetDisabled ? 'disabled' : ''}>${state.resettingRooms.has(room.room_name) ? '重置中' : '重置 Ready'}</button>` : ''}</div></div>
 	</article>`
 }
 
@@ -432,6 +474,13 @@ function showActionDialog(intent, results) {
 }
 
 async function confirmRoomAction() {
+	const reset = state.pendingReset
+	if (reset) {
+		actionDialog.close()
+		state.pendingReset = null
+		void sendRoomReset(reset)
+		return
+	}
 	const intent = state.pendingAction
 	actionDialog.close()
 	state.pendingAction = null
@@ -463,6 +512,105 @@ async function confirmRoomAction() {
 		showToast(error.message || String(error))
 	} finally {
 		state.requestPending = false
+		render()
+	}
+}
+
+async function openRoomReset(roomName) {
+	const room = state.rooms.get(roomName)
+	if (
+		!room ||
+		room.lifecycle !== 'suspended' ||
+		!room.reset_ready ||
+		room.resetting ||
+		state.resettingRooms.has(roomName)
+	)
+		return
+	try {
+		const response = await apiFetch(
+			`/api/rooms/${encodeURIComponent(roomName)}/reset-ready/preflight`,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					epoch: state.epoch,
+					expected_reconciliation_run: Number(room.reconciliation_run || 0),
+					expected_generation: Number(room.generation || 0),
+				}),
+			},
+			[409],
+		)
+		const body = await response.json().catch(() => ({}))
+		if (body.room) applyRoom(body.room)
+		if (response.status === 409) {
+			showToast(body.error || '教室目前無法重置，請重新觀測。')
+			return
+		}
+		const meetings = Array.isArray(body.meetings) ? body.meetings : []
+		state.pendingReset = {
+			roomName,
+			epoch: state.epoch,
+			expectedRun: Number(room.reconciliation_run || 0),
+			expectedGeneration: Number(room.generation || 0),
+			meetingIDs: meetings.map(meeting => meeting.meeting_id),
+		}
+		document.getElementById('action-dialog-kicker').textContent = '破壞性操作'
+		document.getElementById('action-dialog-title').textContent = `重置 ${roomName} 的所有議程？`
+		document.getElementById('action-dialog-copy').textContent =
+			'重置會永久刪除 paused 與 completed 議程的逐字稿及翻譯；ready 議程不會變更。'
+		document.getElementById('action-dialog-facts').innerHTML =
+			meetings
+				.map(
+					meeting =>
+						`<div><span>議程</span><strong>${escapeHtml(meeting.meeting_id)}</strong></div><div><span>狀態</span><strong>${escapeHtml(meeting.status)} / ${escapeHtml(meeting.action)}</strong></div>`,
+				)
+				.join('') || '<div><span>結果</span><strong>沒有需要重置的議程</strong></div>'
+		const confirmButton = document.getElementById('action-confirm')
+		confirmButton.textContent = '確認重置'
+		confirmButton.className = 'primary-button danger-button'
+		confirmButton.disabled = false
+		actionDialog.showModal()
+	} catch (error) {
+		showToast(error.message || String(error))
+	}
+}
+
+async function sendRoomReset(intent) {
+	if (state.resettingRooms.has(intent.roomName)) return
+	state.resettingRooms.add(intent.roomName)
+	render()
+	try {
+		const response = await apiFetch(
+			`/api/rooms/${encodeURIComponent(intent.roomName)}/reset-ready`,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					epoch: intent.epoch,
+					expected_reconciliation_run: intent.expectedRun,
+					expected_generation: intent.expectedGeneration,
+					meeting_ids: intent.meetingIDs,
+					confirmed: true,
+				}),
+			},
+			[409],
+		)
+		const body = await response.json().catch(() => ({}))
+		if (body.room) applyRoom(body.room)
+		if (response.status === 409) throw new Error(body.error || '教室狀態已改變，請重新操作。')
+		const results = Array.isArray(body.results) ? body.results : []
+		const failed = results.filter(result => result.outcome === 'failed')
+		addMessage(
+			failed.length ? 'error' : 'info',
+			intent.roomName,
+			`Ready 重置完成：${results.length - failed.length} 成功，${failed.length} 失敗`,
+		)
+		if (failed.length)
+			showToast(failed.map(result => `${result.meeting_id}: ${result.error || '重置失敗'}`).join('；'))
+	} catch (error) {
+		showToast(error.message || String(error))
+	} finally {
+		state.resettingRooms.delete(intent.roomName)
 		render()
 	}
 }
