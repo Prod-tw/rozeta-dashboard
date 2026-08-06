@@ -404,7 +404,7 @@ function renderRooms() {
 function roomCardMarkup(room) {
 	const action = reconciliationActionFor(room)
 	const actionLabel = { start: '開始教室', stop: '停止教室', 'force-stop': '強制停止' }[action]
-	const actionClass = action === 'force-stop' ? 'danger-button' : 'primary-button'
+	const actionClass = actionButtonClass(action)
 	const resetVisible = room.lifecycle === 'suspended'
 	const resetDisabled = room.resetting || state.resettingRooms.has(room.room_name) || !room.reset_ready
 	return `<article class="room-card">
@@ -427,10 +427,10 @@ function renderOperator() {
 	const action = reconciliationActionFor(room)
 	const threshold = alertThresholdForRoom(room.room_name)
 	operatorContent.innerHTML = `<div class="operator-card">
-		<div class="operator-card-header"><div><h3>${escapeHtml(room.room_name)}</h3><p class="room-meta">${escapeHtml(room.summary || '等待伺服器狀態')}</p></div><span class="status-label ${statusClass(room)}">${escapeHtml(translateLifecycle(room.lifecycle))}</span></div>
+		<div class="operator-card-header"><div><h3>${escapeHtml(room.room_name)}</h3><p class="room-meta">${escapeHtml(room.summary || '等待伺服器狀態')}</p></div></div>
 		<div class="agenda-summary"><span>目前議程</span><strong>${escapeHtml(room.desired_meeting_id ? meetingTitle(room.room_name, room.desired_meeting_id) : '尚未設定議程')}</strong><span>${escapeHtml(room.desired_meeting_id || '請從下方選擇議程')}</span></div>
 		<div class="schedule-controls"><div><strong>議程時間校正</strong><p class="room-meta">正數代表延遲，負數代表提前。</p></div><div class="schedule-inputs"><label>偏差（分鐘）<input type="number" min="-120" max="120" step="1" value="${Number(room.schedule_offset_minutes || 0)}" data-schedule-offset /></label><label>警報門檻（分鐘）<input type="number" min="0" max="120" step="1" value="${threshold}" data-alert-threshold /></label><button type="button" class="secondary-button" data-save-schedule-settings ${state.requestPending || !state.connected ? 'disabled' : ''}>套用</button><button type="button" class="secondary-button" data-enable-notifications>啟用系統通知</button></div></div>
-		<div class="operator-actions"><button type="button" class="secondary-button" data-agenda-toggle ${state.requestPending || !state.connected ? 'disabled' : ''}>切換議程</button>${action ? `<button type="button" class="${action === 'force-stop' ? 'danger-button' : 'primary-button'}" data-room-action="${action}" data-room-name="${escapeAttr(room.room_name)}" ${state.requestPending || !state.connected ? 'disabled' : ''}>${action === 'start' ? '開始教室' : action === 'stop' ? '停止教室' : '強制停止教室'}</button>` : '<button type="button" disabled>處理中</button>'}</div>
+		<div class="operator-actions"><button type="button" class="secondary-button" data-agenda-toggle ${state.requestPending || !state.connected ? 'disabled' : ''}>切換議程</button>${action ? `<button type="button" class="${actionButtonClass(action)}" data-room-action="${action}" data-room-name="${escapeAttr(room.room_name)}" ${state.requestPending || !state.connected ? 'disabled' : ''}>${action === 'start' ? '開始教室' : action === 'stop' ? '停止教室' : '強制停止教室'}</button>` : '<button type="button" disabled>處理中</button>'}</div>
 		<div class="agenda-list" id="agenda-list" hidden>${meetings.length ? meetings.map(meetingMarkup).join('') : '<p class="room-meta">目前沒有可選擇的議程。</p>'}</div>
 	</div>`
 	operatorContent
@@ -546,7 +546,7 @@ async function saveScheduleSettings(room) {
 
 function meetingMarkup(meeting) {
 	const selected = meeting.id === state.rooms.get(state.operationRoom)?.desired_meeting_id
-	return `<button type="button" class="agenda-choice ${selected ? 'selected' : ''}" data-agenda-id="${escapeAttr(meeting.id)}" ${state.requestPending || !state.connected ? 'disabled' : ''}><strong>${escapeHtml(meeting.title || meeting.id)}</strong><small>${escapeHtml(formatTime(meeting.start_time || meeting.starts_at))} · ${escapeHtml(translateMeetingStatus(meeting.status))}</small></button>`
+	return `<button type="button" class="agenda-choice ${selected ? 'selected' : ''}" data-agenda-id="${escapeAttr(meeting.id)}" ${state.requestPending || !state.connected ? 'disabled' : ''}><strong>${escapeHtml(meeting.title || meeting.id)}</strong><small>${meetingTimeMarkup(meeting)} · ${escapeHtml(translateMeetingStatus(meeting.status))}</small></button>`
 }
 
 async function openAgendaConfirmation(meetingID) {
@@ -555,7 +555,7 @@ async function openAgendaConfirmation(meetingID) {
 	if (!room || !meeting || !canEditDesired(room)) return
 	state.pendingAgenda = { room, meeting }
 	document.getElementById('agenda-confirmation').innerHTML =
-		`<div><span>議程</span><strong>${escapeHtml(meeting.title || meeting.id)}</strong></div><div><span>開始時間</span><strong>${escapeHtml(formatTime(meeting.start_time || meeting.starts_at))}</strong></div>`
+		`<div><span>議程</span><strong>${escapeHtml(meeting.title || meeting.id)}</strong></div><div><span>時間</span><strong>${meetingTimeMarkup(meeting)}</strong></div>`
 	agendaDialog.showModal()
 }
 
@@ -703,7 +703,7 @@ function showActionDialog(intent, results) {
 		.join('')
 	const confirmButton = document.getElementById('action-confirm')
 	confirmButton.textContent = `確認${label}`
-	confirmButton.className = `primary-button ${intent.action === 'force-stop' ? 'danger-button' : ''}`
+	confirmButton.className = actionButtonClass(intent.action)
 	confirmButton.disabled = count === 0
 	actionDialog.showModal()
 }
@@ -1038,6 +1038,10 @@ function statusClass(room) {
 	return room.lifecycle || 'unknown'
 }
 
+function actionButtonClass(action) {
+	return { start: 'start-button', stop: 'stop-button', 'force-stop': 'danger-button' }[action] || 'secondary-button'
+}
+
 function translateLifecycle(lifecycle) {
 	return (
 		{ active: '教室使用中', starting: '正在開始教室', stopping: '正在停止教室', suspended: '教室已停止' }[
@@ -1059,6 +1063,31 @@ function formatTime(value) {
 	const date = value instanceof Date ? value : new Date(value)
 	if (Number.isNaN(date.getTime())) return '時間未知'
 	return new Intl.DateTimeFormat('zh-TW', { dateStyle: 'short', timeStyle: 'short' }).format(date)
+}
+
+function meetingTimeMarkup(meeting) {
+	// Keep the OPASS window visible when a room offset is active so operators can compare the configured schedule with the adjusted one.
+	const start = parseMeetingTime(meeting.scheduled_start || meeting.start_time || meeting.starts_at)
+	const end = parseMeetingTime(meeting.scheduled_end || meeting.end_time || meeting.ends_at)
+	const offsetMinutes = Number(state.rooms.get(state.operationRoom)?.schedule_offset_minutes || 0)
+	const original = `${formatClockTime(start)} - ${formatClockTime(end)}`
+	if (!offsetMinutes || !start || !end) return escapeHtml(original)
+	const adjustedStart = new Date(start.getTime() + offsetMinutes * 60_000)
+	const adjustedEnd = new Date(end.getTime() + offsetMinutes * 60_000)
+	return `<del class="schedule-original-time">${escapeHtml(original)}</del><span class="schedule-adjusted-time">${escapeHtml(`${formatClockTime(adjustedStart)} - ${formatClockTime(adjustedEnd)}`)}</span>`
+}
+
+function parseMeetingTime(value) {
+	if (!value) return null
+	const date = value instanceof Date ? value : new Date(value)
+	return Number.isNaN(date.getTime()) ? null : date
+}
+
+function formatClockTime(value) {
+	if (!value) return '時間未知'
+	const date = value instanceof Date ? value : new Date(value)
+	if (Number.isNaN(date.getTime())) return '時間未知'
+	return new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
 }
 
 function renderEventDayPicker() {

@@ -315,6 +315,16 @@ a {
 	color: #fff;
 }
 
+.start-button {
+	background: var(--control-accent);
+	color: #fff;
+}
+
+.stop-button {
+	background: var(--control-warn-soft);
+	color: var(--control-warn);
+}
+
 .danger-button {
 	background: var(--control-danger-soft);
 	color: var(--control-danger);
@@ -514,6 +524,17 @@ a {
 	color: var(--control-muted);
 }
 
+.schedule-original-time {
+	display: block;
+	color: var(--control-muted);
+}
+
+.schedule-adjusted-time {
+	display: block;
+	color: var(--control-warn);
+	font-weight: 800;
+}
+
 .agenda-choice strong,
 .agenda-choice small {
 	display: block;
@@ -609,6 +630,11 @@ a {
 .status-label.unknown {
 	background: var(--control-danger-soft);
 	color: var(--control-danger);
+}
+
+.status-label {
+	flex-shrink: 0;
+	white-space: nowrap;
 }
 
 .room-action {

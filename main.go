@@ -495,6 +495,7 @@ type roomMeetingView struct {
 	PausedAt       time.Time  `json:"paused_at,omitempty,omitzero"`
 	UpdatedAt      time.Time  `json:"updated_at,omitempty,omitzero"`
 	ScheduledStart *time.Time `json:"scheduled_start,omitempty"`
+	ScheduledEnd   *time.Time `json:"scheduled_end,omitempty"`
 }
 
 type roomMeetingsResponse struct {

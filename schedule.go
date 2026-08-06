@@ -19,6 +19,7 @@ const opassScheduleURL = "https://coscup.org/2026/api/opass.json"
 type meetingSchedule struct {
 	enabled  bool
 	starts   map[string]time.Time
+	ends     map[string]time.Time
 	opassIDs map[string]string
 
 	snapshots map[string][]roomMeetingView
@@ -47,6 +48,7 @@ type opassSchedule struct {
 	Sessions []struct {
 		ID    string `json:"id"`
 		Start string `json:"start"`
+		End   string `json:"end"`
 	} `json:"sessions"`
 }
 
@@ -78,7 +80,7 @@ func loadMeetingScheduleWithOptions(
 	if err != nil {
 		return meetingSchedule{}, nil, &scheduleRemoteError{err: err}
 	}
-	sessionStarts, err := indexOPASSSessions(opass)
+	sessionTimes, err := indexOPASSSessions(opass)
 	if err != nil {
 		return meetingSchedule{}, nil, &scheduleRemoteError{err: err}
 	}
@@ -94,30 +96,33 @@ func loadMeetingScheduleWithOptions(
 	}
 
 	starts := make(map[string]time.Time, len(mappings))
+	ends := make(map[string]time.Time, len(mappings))
 	opassIDs := make(map[string]string, len(mappings))
 	mappedSessionIDs := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
-		startValue, found := sessionStarts[mapping.sessionID]
+		times, found := sessionTimes[mapping.sessionID]
 		if !found {
 			log.Printf("ignoring unmatched session mapping: csv_line=%d meeting_id=%q session_id=%q reason=session_not_in_opass", mapping.line, mapping.meetingID, mapping.sessionID)
 			continue
 		}
-		start, err := time.Parse(time.RFC3339, startValue)
-		if err != nil {
-			return meetingSchedule{}, nil, fmt.Errorf("session CSV line %d meeting %q has invalid opass start time %q", mapping.line, mapping.meetingID, startValue)
+		start := times.start
+		end := times.end
+		if !end.After(start) {
+			return meetingSchedule{}, nil, fmt.Errorf("session CSV line %d meeting %q has OPASS end time before or equal to start time", mapping.line, mapping.meetingID)
 		}
 		starts[mapping.meetingID] = start
+		ends[mapping.meetingID] = end
 		opassIDs[mapping.meetingID] = mapping.sessionID
 		mappedSessionIDs[mapping.sessionID] = struct{}{}
 	}
-	for sessionID := range sessionStarts {
+	for sessionID := range sessionTimes {
 		if _, found := mappedSessionIDs[sessionID]; !found {
 			log.Printf("ignoring unmatched opass session: session_id=%q reason=session_not_in_session_csv", sessionID)
 		}
 	}
 
 	return meetingSchedule{
-		enabled: true, starts: starts, opassIDs: opassIDs,
+		enabled: true, starts: starts, ends: ends, opassIDs: opassIDs,
 		snapshots: make(map[string][]roomMeetingView),
 	}, warnings, nil
 }
@@ -253,8 +258,13 @@ func fetchOPASSScheduleOnce(ctx context.Context, client *http.Client, requestURL
 	return opass, nil
 }
 
-func indexOPASSSessions(opass opassSchedule) (map[string]string, error) {
-	starts := make(map[string]string, len(opass.Sessions))
+type opassSessionTimes struct {
+	start time.Time
+	end   time.Time
+}
+
+func indexOPASSSessions(opass opassSchedule) (map[string]opassSessionTimes, error) {
+	times := make(map[string]opassSessionTimes, len(opass.Sessions))
 	for _, session := range opass.Sessions {
 		id := strings.TrimSpace(session.ID)
 		if id == "" {
@@ -264,15 +274,27 @@ func indexOPASSSessions(opass opassSchedule) (map[string]string, error) {
 		if start == "" {
 			return nil, fmt.Errorf("opass session %q has an empty start time", id)
 		}
-		if _, err := time.Parse(time.RFC3339, start); err != nil {
+		end := strings.TrimSpace(session.End)
+		if end == "" {
+			return nil, fmt.Errorf("opass session %q has an empty end time", id)
+		}
+		startTime, err := time.Parse(time.RFC3339, start)
+		if err != nil {
 			return nil, fmt.Errorf("opass session %q has invalid start time %q", id, start)
 		}
-		if _, duplicate := starts[id]; duplicate {
+		endTime, err := time.Parse(time.RFC3339, end)
+		if err != nil {
+			return nil, fmt.Errorf("opass session %q has invalid end time %q", id, end)
+		}
+		if !endTime.After(startTime) {
+			return nil, fmt.Errorf("opass session %q end time must be after start time", id)
+		}
+		if _, duplicate := times[id]; duplicate {
 			return nil, fmt.Errorf("opass duplicates session ID %q", id)
 		}
-		starts[id] = start
+		times[id] = opassSessionTimes{start: startTime, end: endTime}
 	}
-	return starts, nil
+	return times, nil
 }
 
 func (schedule *meetingSchedule) validateStartupMeetings(roomName string, meetings []roomMeetingView) ([]roomMeetingView, error) {
@@ -306,6 +328,9 @@ func (schedule meetingSchedule) validateMeetings(roomName string, meetings []roo
 		seenStarts[startInstant] = meeting.ID
 		copy := meeting
 		copy.ScheduledStart = &start
+		if end, found := schedule.ends[meeting.ID]; found {
+			copy.ScheduledEnd = &end
+		}
 		prepared = append(prepared, copy)
 	}
 	if snapshot, found := schedule.snapshots[roomName]; found {
@@ -368,6 +393,10 @@ func cloneMeetings(meetings []roomMeetingView) []roomMeetingView {
 			start := *cloned[index].ScheduledStart
 			cloned[index].ScheduledStart = &start
 		}
+		if cloned[index].ScheduledEnd != nil {
+			end := *cloned[index].ScheduledEnd
+			cloned[index].ScheduledEnd = &end
+		}
 	}
 	return cloned
 }
@@ -383,6 +412,9 @@ func (schedule meetingSchedule) prepareMeetings(meetings []roomMeetingView) []ro
 	for index := range prepared {
 		if start, found := schedule.starts[prepared[index].ID]; found {
 			prepared[index].ScheduledStart = &start
+		}
+		if end, found := schedule.ends[prepared[index].ID]; found {
+			prepared[index].ScheduledEnd = &end
 		}
 	}
 	if schedule.enabled {
@@ -418,6 +450,9 @@ func (schedule meetingSchedule) nextMeeting(meetings []roomMeetingView, currentI
 		}
 		copy := meeting
 		copy.ScheduledStart = &start
+		if end, found := schedule.ends[meeting.ID]; found {
+			copy.ScheduledEnd = &end
+		}
 		ordered = append(ordered, copy)
 	}
 	sort.Slice(ordered, func(left, right int) bool {

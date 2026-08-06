@@ -88,7 +88,7 @@ func TestLoadMeetingScheduleRetriesEveryFetchError(t *testing.T) {
 			writer.WriteHeader(http.StatusInternalServerError)
 		default:
 			writer.Header().Set("content-type", "application/json")
-			_, _ = writer.Write([]byte(`{"sessions":[{"id":"SESSION-A","start":"2026-08-08T12:30:00+08:00"}]}`))
+			_, _ = writer.Write([]byte(`{"sessions":[{"id":"SESSION-A","start":"2026-08-08T12:30:00+08:00","end":"2026-08-08T13:30:00+08:00"}]}`))
 		}
 	}))
 	defer server.Close()
@@ -109,6 +109,9 @@ func TestLoadMeetingScheduleRetriesEveryFetchError(t *testing.T) {
 	}
 	if _, found := schedule.starts["meeting-a"]; !found {
 		t.Fatalf("schedule = %#v, want meeting-a start", schedule)
+	}
+	if _, found := schedule.ends["meeting-a"]; !found {
+		t.Fatalf("schedule = %#v, want meeting-a end", schedule)
 	}
 }
 
@@ -161,7 +164,7 @@ func TestScheduleLoadDistinguishesRemoteFailureFromLocalConfiguration(t *testing
 func TestLoadMeetingScheduleIgnoresSessionMappingsMissingFromOPASS(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("content-type", "application/json")
-		_, _ = writer.Write([]byte(`{"sessions":[{"id":"INVALID","start":"2026-08-08T12:30:00+08:00"}]}`))
+		_, _ = writer.Write([]byte(`{"sessions":[{"id":"INVALID","start":"2026-08-08T12:30:00+08:00","end":"2026-08-08T13:30:00+08:00"}]}`))
 	}))
 	defer server.Close()
 
@@ -184,7 +187,7 @@ func TestLoadMeetingScheduleIgnoresSessionMappingsMissingFromOPASS(t *testing.T)
 func TestLoadMeetingScheduleRejectsInvalidMappedStart(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("content-type", "application/json")
-		_, _ = writer.Write([]byte(`{"sessions":[{"id":"INVALID","start":"not-a-time"}]}`))
+		_, _ = writer.Write([]byte(`{"sessions":[{"id":"INVALID","start":"not-a-time","end":"2026-08-08T13:30:00+08:00"}]}`))
 	}))
 	defer server.Close()
 
@@ -201,7 +204,7 @@ func TestLoadMeetingScheduleRejectsInvalidMappedStart(t *testing.T) {
 func TestLoadMeetingScheduleRejectsDuplicateOPASSSessions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("content-type", "application/json")
-		_, _ = writer.Write([]byte(`{"sessions":[{"id":"SAME","start":"2026-08-08T09:00:00+08:00"},{"id":"SAME","start":"2026-08-08T10:00:00+08:00"}]}`))
+		_, _ = writer.Write([]byte(`{"sessions":[{"id":"SAME","start":"2026-08-08T09:00:00+08:00","end":"2026-08-08T10:00:00+08:00"},{"id":"SAME","start":"2026-08-08T10:00:00+08:00","end":"2026-08-08T11:00:00+08:00"}]}`))
 	}))
 	defer server.Close()
 
@@ -225,6 +228,11 @@ func TestMeetingSchedulePrepareMeetings(t *testing.T) {
 			"known-a": first,
 			"later":   second,
 		},
+		ends: map[string]time.Time{
+			"known-a": first.Add(30 * time.Minute),
+			"known-b": first.Add(45 * time.Minute),
+			"later":   second.Add(30 * time.Minute),
+		},
 	}
 	meetings := []roomMeetingView{
 		{ID: "unknown-z", Title: "Unknown Z"},
@@ -243,6 +251,12 @@ func TestMeetingSchedulePrepareMeetings(t *testing.T) {
 	}
 	if meetings[1].ScheduledStart != nil {
 		t.Fatal("prepareMeetings() mutated source meetings")
+	}
+	if meetings[1].ScheduledEnd != nil {
+		t.Fatal("prepareMeetings() mutated source meeting end")
+	}
+	if prepared[0].ScheduledEnd == nil || !prepared[0].ScheduledEnd.Equal(first.Add(30*time.Minute)) {
+		t.Fatalf("prepared[0].ScheduledEnd = %v, want %v", prepared[0].ScheduledEnd, first.Add(30*time.Minute))
 	}
 }
 
