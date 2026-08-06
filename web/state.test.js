@@ -328,6 +328,50 @@ test('schedule alert is disabled unless desired is the sole active meeting', () 
 	)
 })
 
+test('schedule alert detects an active desired meeting that started too early', () => {
+	const room = {
+		room_name: 'room-a',
+		lifecycle: 'active',
+		desired_status: 'in_progress',
+		desired_meeting_id: 'current',
+		active_meeting_ids: ['current'],
+		schedule_offset_minutes: 0,
+	}
+	const meetings = [
+		{ id: 'previous', title: 'Previous', scheduled_start: '2026-08-06T11:00:00Z' },
+		{ id: 'current', title: 'Current', scheduled_start: '2026-08-06T12:00:00Z' },
+		{ id: 'next', title: 'Next', scheduled_start: '2026-08-06T13:00:00Z' },
+	]
+	const alert = evaluateScheduleAlert(room, meetings, new Date('2026-08-06T11:30:00Z'), 10)
+	assert.equal(alert.kind, 'early')
+	assert.equal(alert.meetingID, 'current')
+	assert.equal(alert.previousMeetingID, 'previous')
+	assert.equal(alert.alertAt.toISOString(), '2026-08-06T11:50:00.000Z')
+	assert.equal(evaluateScheduleAlert(room, meetings, new Date('2026-08-06T11:50:00Z'), 10), null)
+})
+
+test('schedule alert does not classify the first meeting as early', () => {
+	const room = {
+		room_name: 'room-a',
+		lifecycle: 'active',
+		desired_status: 'in_progress',
+		desired_meeting_id: 'first',
+		active_meeting_ids: ['first'],
+	}
+	assert.equal(
+		evaluateScheduleAlert(
+			room,
+			[
+				{ id: 'first', scheduled_start: '2026-08-06T12:00:00Z' },
+				{ id: 'next', scheduled_start: '2026-08-06T13:00:00Z' },
+			],
+			new Date('2026-08-06T11:00:00Z'),
+			10,
+		),
+		null,
+	)
+})
+
 test('client test clock starts at the query time and continues at real-time speed', () => {
 	const clock = createClientClock('?alert_test_at=2026-08-06T12:00:00Z', 1_000)
 	assert.equal(clock.enabled, true)

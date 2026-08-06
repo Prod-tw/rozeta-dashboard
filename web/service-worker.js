@@ -7,7 +7,7 @@ self.addEventListener('message', event => {
 	event.waitUntil(
 		self.registration.showNotification(`${alert.testMode ? '測試提醒：' : ''}議程提醒：${alert.roomName}`, {
 			tag: `schedule-alert:${alert.key}`,
-			body: `${alert.testMode ? '測試時間：' : ''}${alert.meetingTitle} 已達切換提醒時間，請確認是否切換。`,
+			body: `${alert.testMode ? '測試時間：' : ''}${alert.kind === 'early' ? `${alert.meetingTitle} 可能提前切換，上一個議程尚未進入容忍區間。` : `${alert.meetingTitle} 已達切換提醒時間，請確認是否切換。`}`,
 			data: { roomName: alert.roomName },
 		}),
 	)

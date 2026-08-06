@@ -140,3 +140,5 @@ PUT /api/rooms/{room_name}/schedule-offset
 偏差必須介於 `-120` 到 `120` 分鐘。警報開關、警報門檻、通知權限與通知狀態全部由 browser 保存，不會寫入 server state。舊版 state 檔案不提供 migration，必須重新建立 v3 state。
 
 操作頁 `/` 也支援 client-only 測試時間模式。操作員可在頁面工具選單設定 `alert_test_at`，設定後會回到目前頁面並以指定時間為起點持續 1:1 流逝；恢復真實時間會移除該 query parameter。`/debug` 不使用這項功能。
+
+時間警報每秒重新計算兩個方向：若 `previous_start + offset <= now < current_start + offset - threshold`，表示目前 desired 議程可能提前切入；若 `now >= next_start + offset + threshold`，表示可能忘記切換下一個議程。

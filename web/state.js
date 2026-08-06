@@ -206,7 +206,13 @@ export function createClientClock(search, realStartedAt = Date.now()) {
 }
 
 export function nextScheduledMeeting(meetings, currentMeetingID) {
-	const ordered = (meetings || [])
+	const ordered = scheduledMeetings(meetings)
+	const currentIndex = ordered.findIndex(meeting => meeting.id === currentMeetingID)
+	return currentIndex >= 0 ? ordered[currentIndex + 1] || null : null
+}
+
+function scheduledMeetings(meetings) {
+	return (meetings || [])
 		.filter(meeting => meeting?.scheduled_start)
 		.slice()
 		.sort((left, right) => {
@@ -215,8 +221,6 @@ export function nextScheduledMeeting(meetings, currentMeetingID) {
 			const titleDifference = String(left.title || '').localeCompare(String(right.title || ''))
 			return titleDifference || String(left.id || '').localeCompare(String(right.id || ''))
 		})
-	const currentIndex = ordered.findIndex(meeting => meeting.id === currentMeetingID)
-	return currentIndex >= 0 ? ordered[currentIndex + 1] || null : null
 }
 
 export function evaluateScheduleAlert(
@@ -235,24 +239,53 @@ export function evaluateScheduleAlert(
 	) {
 		return null
 	}
-	const next = nextScheduledMeeting(meetings, room.desired_meeting_id)
-	const start = new Date(next?.scheduled_start || '')
-	if (!next || Number.isNaN(start.getTime())) return null
+	const ordered = scheduledMeetings(meetings)
+	const currentIndex = ordered.findIndex(meeting => meeting.id === room.desired_meeting_id)
+	const current = currentIndex >= 0 ? ordered[currentIndex] : null
+	const previous = currentIndex > 0 ? ordered[currentIndex - 1] : null
+	const next = currentIndex >= 0 ? ordered[currentIndex + 1] || null : null
+	const currentStart = new Date(current?.scheduled_start || '')
+	if (!current || Number.isNaN(currentStart.getTime())) return null
 	const offsetMinutes = Number.isFinite(Number(room.schedule_offset_minutes))
 		? Number(room.schedule_offset_minutes)
 		: 0
 	const threshold = Number.isFinite(Number(thresholdMinutes))
 		? Number(thresholdMinutes)
 		: defaultAlertThresholdMinutes
-	const alertAt = new Date(start.getTime() + (offsetMinutes + threshold) * 60_000)
+	const offsetMilliseconds = offsetMinutes * 60_000
+	const thresholdMilliseconds = threshold * 60_000
+	if (previous) {
+		const previousStart = new Date(previous.scheduled_start)
+		const earlyAlertAt = new Date(currentStart.getTime() + offsetMilliseconds - thresholdMilliseconds)
+		const previousBoundary = new Date(previousStart.getTime() + offsetMilliseconds)
+		if (now.getTime() >= previousBoundary.getTime() && now.getTime() < earlyAlertAt.getTime()) {
+			return {
+				key: `${room.room_name}:${current.id}:early`,
+				kind: 'early',
+				roomName: room.room_name,
+				meetingID: current.id,
+				meetingTitle: current.title || current.id,
+				scheduledStart: currentStart,
+				adjustedStart: new Date(currentStart.getTime() + offsetMilliseconds),
+				alertAt: earlyAlertAt,
+				previousMeetingID: previous.id,
+				previousMeetingTitle: previous.title || previous.id,
+				overdueMinutes: 0,
+			}
+		}
+	}
+	if (!next) return null
+	const nextStart = new Date(next.scheduled_start)
+	const alertAt = new Date(nextStart.getTime() + offsetMilliseconds + thresholdMilliseconds)
 	if (now.getTime() < alertAt.getTime()) return null
 	return {
 		key: `${room.room_name}:${next.id}`,
+		kind: 'late',
 		roomName: room.room_name,
 		meetingID: next.id,
 		meetingTitle: next.title || next.id,
-		scheduledStart: start,
-		adjustedStart: new Date(start.getTime() + offsetMinutes * 60_000),
+		scheduledStart: nextStart,
+		adjustedStart: new Date(nextStart.getTime() + offsetMilliseconds),
 		alertAt,
 		overdueMinutes: Math.max(0, Math.floor((now.getTime() - alertAt.getTime()) / 60_000)),
 	}

@@ -248,7 +248,7 @@ function refreshAlerts() {
 		if (previous?.key === alert.key || state.notifiedAlerts.has(alert.key)) continue
 		state.notifiedAlerts.add(alert.key)
 		alert.testMode = state.clientClock.enabled
-		addMessage('error', room.room_name, `下一個議程已達切換提醒：${alert.meetingTitle}`)
+		addMessage('error', room.room_name, scheduleAlertSummary(alert))
 		void notifyScheduleAlert(alert)
 	}
 	renderOperatorAlert()
@@ -459,8 +459,19 @@ function renderOperator() {
 function renderOperatorAlert() {
 	const alert = state.alertEnabled ? state.activeAlerts.get(state.operationRoom) : null
 	operatorAlert.innerHTML = alert
-		? `<div class="schedule-alert"><strong>下一個議程需要確認</strong><span>${escapeHtml(alert.meetingTitle)} 預定 ${escapeHtml(formatTime(alert.scheduledStart))}，校正後為 ${escapeHtml(formatTime(alert.adjustedStart))}，已達警報門檻。</span></div>`
+		? `<div class="schedule-alert"><strong>${escapeHtml(scheduleAlertHeading(alert))}</strong><span>${escapeHtml(scheduleAlertSummary(alert))}</span></div>`
 		: ''
+}
+
+function scheduleAlertHeading(alert) {
+	return alert.kind === 'early' ? '目前議程可能提前切換' : '下一個議程需要確認'
+}
+
+function scheduleAlertSummary(alert) {
+	if (alert.kind === 'early') {
+		return `${alert.meetingTitle} 預定 ${formatTime(alert.scheduledStart)}，校正後為 ${formatTime(alert.adjustedStart)}；上一個議程 ${alert.previousMeetingTitle} 尚未進入切換容忍區間。`
+	}
+	return `${alert.meetingTitle} 預定 ${formatTime(alert.scheduledStart)}，校正後為 ${formatTime(alert.adjustedStart)}，已達警報門檻。`
 }
 
 function alertThresholdForRoom(roomName) {
