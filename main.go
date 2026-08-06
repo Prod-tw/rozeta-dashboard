@@ -365,8 +365,16 @@ func (a *app) handleSetupArtifacts(c *gin.Context) {
 	var meetingID string
 	if a.controller != nil {
 		for _, room := range a.controller.snapshotRooms() {
-			if room.RoomName == roomName && len(room.Meetings) > 0 {
-				meetingID = room.Meetings[0].ID
+			if room.RoomName != roomName {
+				continue
+			}
+			for _, meeting := range room.Meetings {
+				// The setup artifact must target a real Rozeta meeting; the preparation
+				// row is selectable UI state and has no embed endpoint.
+				if meeting.Virtual {
+					continue
+				}
+				meetingID = meeting.ID
 				break
 			}
 		}
@@ -447,6 +455,8 @@ func (a *app) handleAdvanceAndStart(c *gin.Context) {
 		status, code = http.StatusConflict, "next_meeting_not_found"
 	case errors.Is(err, errRoomStopping):
 		status, code = http.StatusConflict, "room_stopping"
+	case errors.Is(err, errReconciliationNotActive):
+		status, code = http.StatusConflict, "room_not_active"
 	case errors.Is(err, errStaleControllerState), errors.Is(err, errGenerationConflict):
 		status, code = http.StatusConflict, "stale_controller_state"
 	case errors.Is(err, errScheduleUnavailable):
@@ -489,6 +499,7 @@ type roomMeetingView struct {
 	ID             string     `json:"id"`
 	Title          string     `json:"title"`
 	Status         string     `json:"status"`
+	Virtual        bool       `json:"virtual,omitempty"`
 	Source         string     `json:"source_language,omitempty"`
 	Target         string     `json:"target_language,omitempty"`
 	StartedAt      time.Time  `json:"started_at,omitempty,omitzero"`

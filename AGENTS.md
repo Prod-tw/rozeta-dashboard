@@ -30,7 +30,7 @@ Startup validates the account/session/OPASS/Rozeta intersection once. Malformed 
 ## Controller Invariants
 
 - State version 2 persists only desired meeting ID, generation, and automatic-Resume consumption. Lifecycle and remote observations are process-local; every restart leaves rooms `suspended / ActiveSetUnknown`.
-- While active, the desired meeting must be the account's only meeting in the complete paginated `GET /api/v1/meetings?status=in_progress` result. Observe every two seconds and immediately after commands.
+- While active, a real desired meeting must be the account's only meeting in the complete paginated `GET /api/v1/meetings?status=in_progress` result. The virtual `__controller_preparation__` desired meeting is converged after any successful active-set observation and dispatches no automatic commands. Observe every two seconds and immediately after commands.
 - Each room has one serial, coalesced `Observe -> Diff -> Act -> Requeue` path fenced by reconciliation run and desired generation. Start the desired meeting before pausing old active meetings, and only report convergence after a fresh observation proves the invariant.
 - A completed desired meeting may be automatically Resumed once per generation. Persist consumption before dispatch; re-arming requires a dedicated generation and confirmation because Resume is destructive.
 - Normal Stop requires an observable active set and repeatedly Pauses all active meetings until a fresh empty observation. Force-stop is available during stopping, auto-runs after 30 seconds, permits restart, and reports `RemoteOutcomeUnknown` because accepted remote commands cannot be revoked.

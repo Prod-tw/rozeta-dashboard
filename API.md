@@ -1,19 +1,18 @@
 # External API
 
-## 查詢目前進行中的議程
+## 查詢 controller 目前議程
 
-查詢指定 room 目前可確認的議程。此 endpoint 不需要 session 或 API token。
+查詢指定 room 的 persisted desired meeting。此 endpoint 不需要 session 或 API token，也不查詢 Rozeta；因此 suspended、啟動中或遠端尚未追上時，仍會回報 controller desired。
 
 ```http
 GET /api/v1/rooms/{room_name}/in-progress
 ```
 
-controller 會查詢 Rozeta 完整分頁的 `status=in_progress` 結果：
+controller 會從啟動時驗證的 OPASS/session snapshot 解析 desired：
 
-- 沒有進行中的議程時回傳 `null`。
-- 只有一個進行中的議程時回傳該議程。
-- 有多個進行中的議程時，只在 controller 的 desired meeting 也正在進行時回傳它。
-- 有多個進行中的議程但 desired meeting 不在其中時回傳 `null`，不依 Rozeta 回傳順序猜測。
+- 沒有 desired meeting 時回傳 `null`。
+- 實際議程回傳 snapshot 的 title 與 session ID，不受 Rozeta 目前 status 影響。
+- 虛擬 `準備` 議程回傳 `name: "準備"` 與空的 `opass_id`。
 
 ### 成功回應
 
@@ -35,18 +34,17 @@ Content-Type: application/json
 null
 ```
 
-`name` 是 Rozeta meeting 的 `title`；`opass_id` 是 `session.csv` 的 `Session ID`，不是 Rozeta meeting ID。只有通過啟動時 OPASS、session CSV 與 Rozeta 交集驗證的議程才會被回傳。
+`name` 是 startup snapshot 的 meeting title；`opass_id` 是 `session.csv` 的 `Session ID`，不是 Rozeta meeting ID。虛擬 `準備` 沒有 OPASS session，因此 `opass_id` 為空字串。
 
 ### 錯誤回應
 
 | HTTP  | 情況                               |
 | ----- | ---------------------------------- |
 | `404` | room 不存在                        |
-| `502` | 無法從 Rozeta 取得完整的進行中議程 |
 
 ## 切換至下一場並啟動 reconciliation
 
-讓外部系統透過單一明確確認，要求指定 room 將排程中的下一個 meeting 設為 desired meeting，並在需要時啟動 reconciliation。
+讓外部系統要求指定 active room 將排程中的下一個 meeting 設為 desired meeting，並啟動 reconciliation。
 
 ```http
 POST /api/v1/rooms/{room_name}/actions/advance-and-start
@@ -57,11 +55,11 @@ Authorization: Bearer <external-api-token>
 
 ### 行為
 
-1. 以目前 persisted desired meeting 為基準，依排程選擇下一個 meeting。
-2. 驗證 room 未在 `stopping`，並以目前 process epoch 與 reconciliation run 防止舊操作影響新 run。
+1. 以目前 persisted desired meeting 為基準，依排程選擇下一個 meeting；第 0 `準備` 是所有實際排程之前的排序起點。
+2. 驗證 room 為 `active`，且以目前 process epoch 與 reconciliation run 防止舊操作影響新 run。
 3. Preflight 讀取下一個 meeting 的最新狀態，以及完整分頁的 `status=in_progress` active set。
 4. Preflight 成功後，將下一個 meeting 與新 generation 原子寫入 state v3；新 generation 取得一次自動 Resume 額度。
-5. 若 room 為 `suspended`，建立新 run 並依序進入 `starting`、`active`；若已是 `active`，立即 reconcile 新 generation。
+5. Room 保持既有 `active` run，立即 reconcile 新 generation。
 6. Reconciliation 先讓新 desired meeting 達到 `in_progress`，確認後才 Pause 其他 active meetings，最終收斂至 active set 恰為 `{desired}`。
 
 「下一場」只考慮具有 `scheduled_start` 的 meeting，並依 `scheduled_start`、title、ID 排序。未排程的 meeting 不使用 Rozeta API 回傳順序推測位置。Session schedule 只提供推薦與排序，不會自行選擇 desired meeting。
@@ -82,7 +80,7 @@ Content-Type: application/json
 	"room_name": "R0",
 	"meeting_id": "meeting-b",
 	"generation": 8,
-	"lifecycle": "starting",
+	"lifecycle": "active",
 	"status": "accepted"
 }
 ```
@@ -97,6 +95,7 @@ Content-Type: application/json
 | `409` | `current_meeting_unscheduled` | 目前的 desired meeting 不在排程內                                             |
 | `409` | `next_meeting_not_found`      | 目前的 desired meeting 已是排程中的最後一場                                   |
 | `409` | `room_stopping`               | room 正在停止，無法接受新操作                                                 |
+| `409` | `room_not_active`             | room 必須先由 Start 進入 active                                                   |
 | `409` | `stale_controller_state`      | process epoch 或 reconciliation run 已過期                                    |
 | `503` | `preflight_unavailable`       | 無法完整觀察下一場狀態或 active set；不接受 desired generation，也不啟動 room |
 | `503` | `schedule_unavailable`        | 沒有可用的 meeting 排程                                                       |

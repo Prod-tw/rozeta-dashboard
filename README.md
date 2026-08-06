@@ -1,6 +1,6 @@
 # Rozeta Declarative Controller
 
-Authenticated control plane that lets administrators reconcile each Rozeta room account to one persisted desired meeting. While a room is active, the controller maintains the invariant that the desired meeting is the account's only meeting with `status=in_progress`.
+Authenticated control plane that lets administrators reconcile each Rozeta room account to one persisted desired meeting. While a room is active, the controller maintains the invariant that the desired meeting is the account's only meeting with `status=in_progress`, except for the controller-owned virtual `準備` meeting.
 
 ## How to Run
 
@@ -17,9 +17,9 @@ The account CSV starts with `account,User ID,Token` or `帳號,User ID,Token`. C
 
 The versioned state file is authoritative and must be retained across restarts. Desired state contains the meeting ID, generation, and persisted automatic-Resume consumption record; lifecycle and run intent are process-local. An existing version 1 state file is atomically migrated to version 2 by preserving meeting IDs and generations and dropping `running`. Migration never starts reconciliation or sends a Rozeta command. A malformed or unsupported state file stops startup.
 
-Every process start leaves every room `suspended / ActiveSetUnknown`. A room without persisted desired state remains `InitialMeetingRequired` until an administrator chooses one. Administrators explicitly start, stop, or force-stop rooms individually or through browser-captured bulk controls; every lifecycle action requires confirmation. OPASS is not reloaded after startup; later Rozeta status reads ignore and log meetings outside the validated snapshot while preserving the OPASS ordering.
+Every process start leaves every room `suspended / ActiveSetUnknown`. A room without persisted desired state remains `InitialMeetingRequired` until an administrator chooses one. The meeting list includes an explicit virtual `準備` meeting (`__controller_preparation__`) with no time; selecting it makes a successful active-set observation converged without automatic Rozeta commands. Administrators explicitly start, stop, or force-stop rooms individually or through browser-captured bulk controls; every lifecycle action requires confirmation. OPASS is not reloaded after startup; later Rozeta status reads ignore and log meetings outside the validated snapshot while preserving the OPASS ordering.
 
-The external `POST /api/v1/rooms/{room_name}/actions/advance-and-start` endpoint requires `Authorization: Bearer $EXTERNAL_API_TOKEN`. It advances only through meetings with a loaded `scheduled_start`, performs bounded remote preflight retries, and returns `503` without changing desired state if preflight cannot complete. The admin page keeps the failure visible as a room alert.
+The external `POST /api/v1/rooms/{room_name}/actions/advance-and-start` endpoint requires `Authorization: Bearer $EXTERNAL_API_TOKEN` and only accepts an active room. It advances from `準備` to the first scheduled meeting, or from a real meeting to the next scheduled meeting, performs bounded remote preflight retries, and returns `503` without changing desired state if preflight cannot complete. The admin page does not trigger this endpoint; the external caption workflow does.
 
 Start performs a remote preflight before activating a room. While active, the controller observes the complete paginated `status=in_progress` set every five seconds. It starts the desired meeting before pausing old active meetings, preserving availability while eventually converging to exactly `{desired}`. A completed desired meeting may be automatically Resumed at most once per generation; consumption is persisted before dispatch so a crash or timeout cannot repeat the destructive operation. Start and completed-meeting confirmations must warn that Resume permanently deletes completed transcripts and translations.
 

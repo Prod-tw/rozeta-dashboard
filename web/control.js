@@ -557,7 +557,10 @@ async function saveScheduleSettings(room) {
 
 function meetingMarkup(meeting) {
 	const selected = meeting.id === state.rooms.get(state.operationRoom)?.desired_meeting_id
-	return `<button type="button" class="agenda-choice ${selected ? 'selected' : ''}" data-agenda-id="${escapeAttr(meeting.id)}" ${state.requestPending || !state.connected ? 'disabled' : ''}><strong>${escapeHtml(meeting.title || meeting.id)}</strong><small>${meetingTimeMarkup(meeting)} · ${escapeHtml(translateMeetingStatus(meeting.status))}</small></button>`
+	const details = meeting.virtual
+		? '第 0 個議程 · 不指定 Rozeta 議程'
+		: `${meetingTimeMarkup(meeting)} · ${escapeHtml(translateMeetingStatus(meeting.status))}`
+	return `<button type="button" class="agenda-choice ${selected ? 'selected' : ''}" data-agenda-id="${escapeAttr(meeting.id)}" ${state.requestPending || !state.connected ? 'disabled' : ''}><strong>${escapeHtml(meeting.title || meeting.id)}</strong><small>${details}</small></button>`
 }
 
 async function openAgendaConfirmation(meetingID) {
@@ -565,8 +568,11 @@ async function openAgendaConfirmation(meetingID) {
 	const meeting = (state.meetings.get(state.operationRoom) || []).find(item => item.id === meetingID)
 	if (!room || !meeting || !canEditDesired(room)) return
 	state.pendingAgenda = { room, meeting }
+	const details = meeting.virtual
+		? '<div><span>說明</span><strong>第 0 個議程，不指定 Rozeta 議程</strong></div>'
+		: `<div><span>時間</span><strong>${meetingTimeMarkup(meeting)}</strong></div>`
 	document.getElementById('agenda-confirmation').innerHTML =
-		`<div><span>議程</span><strong>${escapeHtml(meeting.title || meeting.id)}</strong></div><div><span>時間</span><strong>${meetingTimeMarkup(meeting)}</strong></div>`
+		`<div><span>議程</span><strong>${escapeHtml(meeting.title || meeting.id)}</strong></div>${details}`
 	agendaDialog.showModal()
 }
 

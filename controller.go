@@ -530,6 +530,9 @@ func (c *controller) advanceAndStart(ctx context.Context, roomName string) (adva
 	if lifecycle == reconciliationStopping {
 		return advanceResult{}, errRoomStopping
 	}
+	if lifecycle != reconciliationActive {
+		return advanceResult{}, errReconciliationNotActive
+	}
 
 	preflight, next, err := c.advancePreflightWithRetry(ctx, room, run, generation, currentID)
 	if err != nil {
@@ -542,7 +545,7 @@ func (c *controller) advanceAndStart(ctx context.Context, roomName string) (adva
 	defer c.storeMu.Unlock()
 	c.mu.Lock()
 	if room.reconciliationRun != run || room.desired.Generation != generation ||
-		room.desired.MeetingID != currentID || room.lifecycle == reconciliationStopping {
+		room.desired.MeetingID != currentID || room.lifecycle != reconciliationActive {
 		c.mu.Unlock()
 		return advanceResult{}, errStaleControllerState
 	}
@@ -550,7 +553,11 @@ func (c *controller) advanceAndStart(ctx context.Context, roomName string) (adva
 		c.mu.Unlock()
 		return advanceResult{}, errGenerationExhausted
 	}
-	nextDesired := desiredState{MeetingID: next.ID, Generation: generation + 1}
+	nextDesired := desiredState{
+		MeetingID:             next.ID,
+		Generation:            generation + 1,
+		ScheduleOffsetMinutes: room.desired.ScheduleOffsetMinutes,
+	}
 	candidate := cloneStateFile(c.file)
 	candidate.Rooms[roomName] = nextDesired
 	c.mu.Unlock()
@@ -563,7 +570,7 @@ func (c *controller) advanceAndStart(ctx context.Context, roomName string) (adva
 	}
 
 	c.mu.Lock()
-	if room.reconciliationRun != run || room.desired.Generation != generation || room.desired.MeetingID != currentID || room.lifecycle == reconciliationStopping {
+	if room.reconciliationRun != run || room.desired.Generation != generation || room.desired.MeetingID != currentID || room.lifecycle != reconciliationActive {
 		c.mu.Unlock()
 		return advanceResult{}, errStaleControllerState
 	}
@@ -581,33 +588,12 @@ func (c *controller) advanceAndStart(ctx context.Context, roomName string) (adva
 	room.updatedAt = time.Now().UTC()
 	room.revision++
 	c.file = candidate
-	var runCtx context.Context
-	if room.lifecycle == reconciliationSuspended {
-		if room.reconciliationRun == ^uint64(0) {
-			c.mu.Unlock()
-			return advanceResult{}, errGenerationExhausted
-		}
-		room.reconciliationRun++
-		room.lifecycle = reconciliationStarting
-		room.stopDeadline = time.Time{}
-		room.activeSetStale = true
-		room.summary, room.summaryReason = "Reconciling", "StartingDesiredMeeting"
-		room.conditions = activeConditions(true, false)
-		room.runCtx, room.runCancel = context.WithCancel(c.ctx)
-		run = room.reconciliationRun
-		runCtx = room.runCtx
-		c.wg.Go(func() { c.runRoom(room, run, runCtx) })
-	} else {
-		room.summary, room.summaryReason = summaryForLifecycle(room.lifecycle, next.ID)
-		room.conditions = activeConditions(room.activeSetStale, false)
-	}
+	room.summary, room.summaryReason = summaryForLifecycle(room.lifecycle, next.ID)
+	room.conditions = activeConditions(room.activeSetStale, false)
 	view := c.snapshotLocked(room)
 	result := advanceResult{Room: view, MeetingID: next.ID, Generation: nextDesired.Generation}
-	active := room.lifecycle != reconciliationSuspended
 	c.mu.Unlock()
-	if active {
-		c.notify(room)
-	}
+	c.notify(room)
 	c.publish(view)
 	return result, nil
 }
@@ -761,7 +747,13 @@ func (c *controller) lifecyclePreflight(ctx context.Context, epoch, action strin
 		}
 		result.ActiveMeetingIDs = meetingIDs(active)
 		result.Observable = true
-		if action == "start" && room.desired.MeetingID != "" {
+		if action == "start" && room.desired.MeetingID == preparationMeetingID {
+			// WHY: the preparation meeting is controller-owned and has no Rozeta detail
+			// endpoint. Start still observes the active set, but the virtual target is
+			// immediately considered safe and never carries Resume risk.
+			result.DesiredStatus = "in_progress"
+			result.DestructiveResume = false
+		} else if action == "start" && room.desired.MeetingID != "" {
 			desired, desiredErr := c.getMeeting(ctx, room, room.desired.MeetingID)
 			if desiredErr != nil {
 				result.Observable = false
@@ -1012,6 +1004,13 @@ func (c *controller) reconcileRound(room *controllerRoom, run uint64) {
 		c.setSummary(room, run, generation, reconciliationActive, "Blocked", "InitialMeetingRequired", "an administrator must select a desired meeting")
 		return
 	}
+	if desired.MeetingID == preparationMeetingID {
+		// WHY: the preparation meeting is an internal schedule origin, so requiring it
+		// to appear in Rozeta would block the room before the first real agenda. A
+		// successful active-set observation is enough to converge without commands.
+		c.setSummary(room, run, generation, reconciliationActive, "Converged", "PreparationMeeting", "")
+		return
+	}
 	if containsMeeting(active, desired.MeetingID) {
 		// The filtered active set is authoritative. Previously a failed or lagging
 		// unfiltered list blocked convergence and cleanup even after desired was
@@ -1217,7 +1216,7 @@ func (c *controller) updateDesired(roomName string, update desiredStateUpdate) (
 	// grants the new generation an allowance.
 	reconciling := lifecycle == reconciliationActive || lifecycle == reconciliationStarting
 	authorizeResume := update.Rearm
-	if reconciling {
+	if reconciling && meetingID != preparationMeetingID {
 		ctx, cancel := context.WithTimeout(c.ctx, reconcileRequestTimeout)
 		meeting, err := c.getMeeting(ctx, room, meetingID)
 		cancel()
@@ -1384,7 +1383,7 @@ func (c *controller) listMeetings(ctx context.Context, room *controllerRoom) ([]
 		return nil, err
 	}
 	if !c.schedule.enabled {
-		return meetings, nil
+		return appendPreparationMeeting(meetings), nil
 	}
 	// Previously every full Rozeta read could replace the list and its order. The
 	// startup snapshot now owns identity and order; cross-source additions and
@@ -1394,7 +1393,7 @@ func (c *controller) listMeetings(ctx context.Context, room *controllerRoom) ([]
 		c.app.setMajorError("live Rozeta meeting validation failed", err)
 		return nil, err
 	}
-	return validated, nil
+	return appendPreparationMeeting(validated), nil
 }
 
 func (c *controller) fetchMeetings(ctx context.Context, room *controllerRoom) ([]roomMeetingView, error) {
@@ -1432,6 +1431,8 @@ func (c *controller) validateStartupMeetings(ctx context.Context) error {
 			}
 			seenMeetingIDs[meeting.ID] = room.name
 		}
+		prepared = appendPreparationMeeting(prepared)
+		c.schedule.snapshots[room.name] = cloneMeetings(prepared)
 		c.mu.Lock()
 		room.meetings = cloneMeetings(prepared)
 		room.desiredStatus = observedStatus(prepared, room.desired.MeetingID)
@@ -1454,7 +1455,7 @@ func (c *controller) listActiveMeetings(ctx context.Context, room *controllerRoo
 	})
 }
 
-func (c *controller) currentMeeting(ctx context.Context, roomName string) (*currentMeetingResponse, error) {
+func (c *controller) currentMeeting(_ context.Context, roomName string) (*currentMeetingResponse, error) {
 	c.mu.RLock()
 	room, found := c.rooms[roomName]
 	if !found {
@@ -1463,55 +1464,23 @@ func (c *controller) currentMeeting(ctx context.Context, roomName string) (*curr
 	}
 	desiredMeetingID := room.desired.MeetingID
 	c.mu.RUnlock()
-
-	active, err := c.listActiveMeetings(ctx, room)
-	if err != nil {
-		return nil, err
+	if desiredMeetingID == "" {
+		return nil, nil
 	}
-	if snapshot, found := c.schedule.snapshots[roomName]; found {
-		known := make(map[string]struct{}, len(snapshot))
-		for _, meeting := range snapshot {
-			known[meeting.ID] = struct{}{}
-		}
-		filtered := active[:0]
-		for _, meeting := range active {
-			if _, exists := known[meeting.ID]; exists {
-				filtered = append(filtered, meeting)
-			}
-		}
-		active = filtered
+	if desiredMeetingID == preparationMeetingID {
+		return &currentMeetingResponse{Name: preparationMeetingTitle}, nil
 	}
-	return selectCurrentMeeting(active, desiredMeetingID, c.schedule.opassIDs), nil
-}
-
-func selectCurrentMeeting(active []roomMeetingView, desiredMeetingID string, opassIDs map[string]string) *currentMeetingResponse {
-	if len(active) == 0 {
-		return nil
+	// WHY: this endpoint now reports the controller's selected meeting rather than
+	// Rozeta's transient active set. Caption consumers must follow the operator's
+	// desired agenda even while the remote platform is catching up or stopped.
+	meeting, found := meetingByID(c.schedule.snapshots[roomName], desiredMeetingID)
+	if !found {
+		return nil, nil
 	}
-
-	selected := roomMeetingView{}
-	if len(active) == 1 {
-		selected = active[0]
-	} else {
-		// Multiple remote meetings are a degraded state. Only expose the controller's
-		// desired meeting when it is among them; guessing from response order could
-		// report an old meeting during a transition.
-		for _, meeting := range active {
-			if meeting.ID == desiredMeetingID {
-				selected = meeting
-				break
-			}
-		}
-		if selected.ID == "" {
-			return nil
-		}
-	}
-
-	opassID := strings.TrimSpace(opassIDs[selected.ID])
-	if opassID == "" {
-		return nil
-	}
-	return &currentMeetingResponse{Name: selected.Title, OPASSID: opassID}
+	return &currentMeetingResponse{
+		Name:    meeting.Title,
+		OPASSID: strings.TrimSpace(c.schedule.opassIDs[desiredMeetingID]),
+	}, nil
 }
 
 func (c *controller) getMeeting(ctx context.Context, room *controllerRoom, meetingID string) (roomMeetingView, error) {
@@ -1641,7 +1610,9 @@ func (c *controller) applyActiveObservation(room *controllerRoom, run, generatio
 	room.activeObservedAt = time.Now().UTC()
 	room.activeSetStale = false
 	room.activeSetConfirmedEmpty = len(meetings) == 0
-	if room.desired.MeetingID != "" && containsMeeting(meetings, room.desired.MeetingID) {
+	if room.desired.MeetingID == preparationMeetingID {
+		room.desiredStatus = "in_progress"
+	} else if room.desired.MeetingID != "" && containsMeeting(meetings, room.desired.MeetingID) {
 		room.desiredStatus = "in_progress"
 	} else if room.desiredStatus == "in_progress" {
 		// A fresh filtered active-set exclusion invalidates the previous in_progress

@@ -178,7 +178,7 @@ export function availableMeetingDates(meetingsByRoom) {
 }
 
 export function meetingsForDate(meetings, dateKey) {
-	return (meetings || []).filter(meeting => meetingDateKey(meeting) === dateKey)
+	return (meetings || []).filter(meeting => meeting?.virtual || meetingDateKey(meeting) === dateKey)
 }
 
 export const defaultAlertThresholdMinutes = 5

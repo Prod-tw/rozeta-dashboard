@@ -16,6 +16,39 @@ import (
 
 const opassScheduleURL = "https://coscup.org/2026/api/opass.json"
 
+const (
+	preparationMeetingID    = "__controller_preparation__"
+	preparationMeetingTitle = "準備"
+)
+
+var preparationMeetingStart = time.Unix(0, 0).UTC()
+
+func preparationMeeting() roomMeetingView {
+	return roomMeetingView{ID: preparationMeetingID, Title: preparationMeetingTitle, Status: "in_progress", Virtual: true}
+}
+
+// The virtual row is added to every room's selectable list, while reset and remote
+// operations explicitly remove it before acting on Rozeta-owned meetings.
+func appendPreparationMeeting(meetings []roomMeetingView) []roomMeetingView {
+	for _, meeting := range meetings {
+		if meeting.ID == preparationMeetingID {
+			return meetings
+		}
+	}
+	return append([]roomMeetingView{preparationMeeting()}, meetings...)
+}
+
+func withoutVirtualMeetings(meetings []roomMeetingView) []roomMeetingView {
+	actual := make([]roomMeetingView, 0, len(meetings))
+	for _, meeting := range meetings {
+		if meeting.Virtual || meeting.ID == preparationMeetingID {
+			continue
+		}
+		actual = append(actual, meeting)
+	}
+	return actual
+}
+
 type meetingSchedule struct {
 	enabled  bool
 	starts   map[string]time.Time
@@ -100,6 +133,9 @@ func loadMeetingScheduleWithOptions(
 	opassIDs := make(map[string]string, len(mappings))
 	mappedSessionIDs := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
+		if mapping.meetingID == preparationMeetingID {
+			return meetingSchedule{}, nil, fmt.Errorf("session CSV reserves meeting ID %q", preparationMeetingID)
+		}
 		times, found := sessionTimes[mapping.sessionID]
 		if !found {
 			log.Printf("ignoring unmatched session mapping: csv_line=%d meeting_id=%q session_id=%q reason=session_not_in_opass", mapping.line, mapping.meetingID, mapping.sessionID)
@@ -120,7 +156,6 @@ func loadMeetingScheduleWithOptions(
 			log.Printf("ignoring unmatched opass session: session_id=%q reason=session_not_in_session_csv", sessionID)
 		}
 	}
-
 	return meetingSchedule{
 		enabled: true, starts: starts, ends: ends, opassIDs: opassIDs,
 		snapshots: make(map[string][]roomMeetingView),
@@ -316,6 +351,9 @@ func (schedule meetingSchedule) validateMeetings(roomName string, meetings []roo
 	seenStarts := make(map[int64]string, len(meetings))
 	prepared := make([]roomMeetingView, 0, len(meetings))
 	for _, meeting := range meetings {
+		if meeting.ID == preparationMeetingID {
+			return nil, fmt.Errorf("Rozeta meeting ID %q is reserved by the controller", preparationMeetingID)
+		}
 		start, found := schedule.starts[meeting.ID]
 		if !found {
 			log.Printf("ignoring unmatched Rozeta meeting: room=%q meeting_id=%q reason=meeting_not_in_opass_session_csv", roomName, meeting.ID)
@@ -403,11 +441,21 @@ func cloneMeetings(meetings []roomMeetingView) []roomMeetingView {
 
 func (schedule meetingSchedule) prepareMeetings(meetings []roomMeetingView) []roomMeetingView {
 	prepared := append([]roomMeetingView{}, meetings...)
+	virtual := make([]roomMeetingView, 0, 1)
+	actual := prepared[:0]
+	for _, meeting := range prepared {
+		if meeting.ID == preparationMeetingID || meeting.Virtual {
+			virtual = append(virtual, preparationMeeting())
+			continue
+		}
+		actual = append(actual, meeting)
+	}
+	prepared = actual
 	if !schedule.enabled {
 		sort.Slice(prepared, func(left, right int) bool {
 			return meetingTitleBefore(prepared[left], prepared[right])
 		})
-		return prepared
+		return append(virtual, prepared...)
 	}
 	for index := range prepared {
 		if start, found := schedule.starts[prepared[index].ID]; found {
@@ -429,7 +477,7 @@ func (schedule meetingSchedule) prepareMeetings(meetings []roomMeetingView) []ro
 			return meetingTitleBefore(prepared[left], prepared[right])
 		})
 	}
-	return prepared
+	return append(virtual, prepared...)
 }
 
 func (schedule meetingSchedule) nextMeeting(meetings []roomMeetingView, currentID string) (roomMeetingView, error) {
@@ -439,11 +487,21 @@ func (schedule meetingSchedule) nextMeeting(meetings []roomMeetingView, currentI
 	if !schedule.enabled || len(schedule.starts) == 0 {
 		return roomMeetingView{}, errScheduleUnavailable
 	}
-	if _, scheduled := schedule.starts[currentID]; !scheduled {
-		return roomMeetingView{}, errCurrentMeetingUnscheduled
+	if currentID != preparationMeetingID {
+		if _, scheduled := schedule.starts[currentID]; !scheduled {
+			return roomMeetingView{}, errCurrentMeetingUnscheduled
+		}
 	}
 	ordered := make([]roomMeetingView, 0, len(meetings))
+	preparationAdded := false
 	for _, meeting := range meetings {
+		if meeting.ID == preparationMeetingID || meeting.Virtual {
+			copy := preparationMeeting()
+			copy.ScheduledStart = &preparationMeetingStart
+			ordered = append(ordered, copy)
+			preparationAdded = true
+			continue
+		}
 		start, found := schedule.starts[meeting.ID]
 		if !found {
 			continue
@@ -454,6 +512,11 @@ func (schedule meetingSchedule) nextMeeting(meetings []roomMeetingView, currentI
 			copy.ScheduledEnd = &end
 		}
 		ordered = append(ordered, copy)
+	}
+	if currentID == preparationMeetingID && !preparationAdded {
+		preparation := preparationMeeting()
+		preparation.ScheduledStart = &preparationMeetingStart
+		ordered = append(ordered, preparation)
 	}
 	sort.Slice(ordered, func(left, right int) bool {
 		leftStart := ordered[left].ScheduledStart

@@ -390,6 +390,25 @@ func TestMeetingScheduleNextMeetingUsesScheduledOrder(t *testing.T) {
 	}
 }
 
+func TestMeetingSchedulePreparationMeetingIsBeforeFirstScheduledMeeting(t *testing.T) {
+	first := time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)
+	schedule := meetingSchedule{enabled: true, starts: map[string]time.Time{
+		"meeting-first": first,
+		"meeting-later": first.Add(time.Hour),
+	}}
+
+	next, err := schedule.nextMeeting([]roomMeetingView{
+		{ID: "meeting-later", Title: "Later"},
+		{ID: "meeting-first", Title: "First"},
+	}, preparationMeetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ID != "meeting-first" {
+		t.Fatalf("next preparation meeting = %#v, want meeting-first", next)
+	}
+}
+
 func TestMeetingScheduleNextMeetingRejectsUnscheduledOrFinalCurrent(t *testing.T) {
 	schedule := meetingSchedule{enabled: true, starts: map[string]time.Time{
 		"current": time.Unix(1, 0),

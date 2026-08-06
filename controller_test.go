@@ -164,35 +164,6 @@ func TestDesiredStateFileV3AndRejectsOlderVersions(t *testing.T) {
 	})
 }
 
-func TestSelectCurrentMeeting(t *testing.T) {
-	opassIDs := map[string]string{"meeting-a": "OPASS-A", "meeting-b": "OPASS-B"}
-	active := []roomMeetingView{
-		{ID: "meeting-a", Title: "A"},
-		{ID: "meeting-b", Title: "B"},
-	}
-
-	tests := []struct {
-		name    string
-		active  []roomMeetingView
-		desired string
-		want    *currentMeetingResponse
-	}{
-		{name: "empty", active: nil},
-		{name: "single", active: active[:1], want: &currentMeetingResponse{Name: "A", OPASSID: "OPASS-A"}},
-		{name: "multiple selects desired", active: active, desired: "meeting-b", want: &currentMeetingResponse{Name: "B", OPASSID: "OPASS-B"}},
-		{name: "multiple without desired", active: active, desired: "meeting-c"},
-		{name: "missing opass mapping", active: []roomMeetingView{{ID: "meeting-c", Title: "C"}}},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := selectCurrentMeeting(test.active, test.desired, opassIDs); !equalCurrentMeeting(got, test.want) {
-				t.Fatalf("selectCurrentMeeting() = %#v, want %#v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestScheduleOffsetPersistsWithRevisionFence(t *testing.T) {
 	app := newTestApp(t, map[string]string{"room-a": "token-a"})
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -233,22 +204,10 @@ func TestScheduleOffsetPersistsWithRevisionFence(t *testing.T) {
 	}
 }
 
-func equalCurrentMeeting(left, right *currentMeetingResponse) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return *left == *right
-}
-
 func TestCurrentMeetingEndpointIsPublic(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Query().Get("status") != "in_progress" {
-			t.Errorf("status query = %q, want in_progress", request.URL.Query().Get("status"))
-		}
-		writeJSON(t, writer, map[string]any{
-			"data":  []map[string]any{meetingPayload("meeting-a", "in_progress", 0)},
-			"links": map[string]any{"next": nil},
-		})
+		t.Errorf("current meeting endpoint queried Rozeta: %s %s", request.Method, request.URL)
+		writer.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
@@ -285,6 +244,23 @@ func TestCurrentMeetingEndpointIsPublic(t *testing.T) {
 	}
 	if got != (currentMeetingResponse{Name: "meeting-a", OPASSID: "OPASS-A"}) {
 		t.Fatalf("response = %#v", got)
+	}
+
+	view := roomViewByName(t, c.snapshotRooms(), "room-a")
+	if _, err := c.updateDesired("room-a", desiredStateUpdate{
+		MeetingID: preparationMeetingID, ExpectedEpoch: a.epoch,
+		ExpectedRun: view.ReconciliationRun, ExpectedGeneration: view.Generation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/rooms/room-a/in-progress", nil))
+	var preparation currentMeetingResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &preparation); err != nil {
+		t.Fatal(err)
+	}
+	if preparation != (currentMeetingResponse{Name: preparationMeetingTitle}) {
+		t.Fatalf("preparation response = %#v", preparation)
 	}
 }
 
@@ -592,7 +568,7 @@ func TestRefreshRoomMeetingsEnablesInitialSelectionWithoutOnlineCount(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Lifecycle != "suspended" || len(meetings) != 1 || meetings[0].ID != "meeting-a" || len(view.Meetings) != 1 {
+	if view.Lifecycle != "suspended" || len(meetings) != 2 || meetings[0].ID != preparationMeetingID || meetings[1].ID != "meeting-a" || len(view.Meetings) != 2 {
 		t.Fatalf("view/meetings = %#v/%#v", view, meetings)
 	}
 }
@@ -679,6 +655,37 @@ func TestAdvanceAndStartRejectsStoppingWithoutRemotePreflight(t *testing.T) {
 	}
 }
 
+func TestPreparationStartPreflightDoesNotFetchVirtualMeeting(t *testing.T) {
+	var detailRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/meetings" {
+			detailRequests.Add(1)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeJSON(t, writer, map[string]any{"data": []any{}, "links": map[string]any{"next": nil}})
+	}))
+	defer server.Close()
+
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
+	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	updateTestDesired(t, c, "room-a", preparationMeetingID)
+	view := roomViewByName(t, c.snapshotRooms(), "room-a")
+	target := reconciliationTarget{
+		RoomName:                  "room-a",
+		ExpectedReconciliationRun: view.ReconciliationRun,
+		ExpectedGeneration:        view.Generation,
+	}
+	_, results, err := c.lifecyclePreflight(context.Background(), a.epoch, "start", []reconciliationTarget{target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].Observable || results[0].DesiredStatus != "in_progress" || results[0].DestructiveResume || detailRequests.Load() != 0 {
+		t.Fatalf("preparation preflight/results = %#v/%d", results, detailRequests.Load())
+	}
+}
+
 func TestAdvanceAndStartRetriesTransientPreflightFailure(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -708,6 +715,7 @@ func TestAdvanceAndStartRetriesTransientPreflightFailure(t *testing.T) {
 		"meeting-next":    start.Add(time.Hour),
 	}}
 	updateTestDesired(t, c, "room-a", "meeting-current")
+	activateTestRoom(t, c, "room-a")
 
 	if _, err := c.advanceAndStart(context.Background(), "room-a"); err != nil {
 		t.Fatal(err)
@@ -720,6 +728,61 @@ func TestAdvanceAndStartRetriesTransientPreflightFailure(t *testing.T) {
 		if condition.Type == "AdvanceAndStartReady" {
 			t.Fatalf("successful advance retained alert = %#v", condition)
 		}
+	}
+}
+
+func TestAdvanceAndStartFromPreparationSelectsFirstScheduledMeeting(t *testing.T) {
+	first := time.Date(2026, time.August, 8, 1, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch {
+		case request.URL.Path == "/api/v1/meetings/meeting-first":
+			writeJSON(t, writer, meetingPayload("meeting-first", "ready", 1))
+		case request.URL.Path == "/api/v1/meetings" && request.URL.Query().Get("status") == "in_progress":
+			writeJSON(t, writer, map[string]any{"data": []any{}, "links": map[string]any{"next": nil}})
+		case request.URL.Path == "/api/v1/meetings":
+			writeJSON(t, writer, map[string]any{
+				"data": []any{
+					meetingPayload("meeting-later", "ready", 2),
+					meetingPayload("meeting-first", "ready", 1),
+				},
+				"links": map[string]any{"next": nil},
+			})
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
+	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	c.schedule = meetingSchedule{enabled: true, starts: map[string]time.Time{
+		"meeting-first": first,
+		"meeting-later": first.Add(time.Hour),
+	}}
+	updateTestDesired(t, c, "room-a", preparationMeetingID)
+	activateTestRoom(t, c, "room-a")
+
+	result, err := c.advanceAndStart(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MeetingID != "meeting-first" || result.Room.Lifecycle != "active" {
+		t.Fatalf("advance result = %#v", result)
+	}
+}
+
+func TestAdvanceAndStartRejectsSuspendedRoom(t *testing.T) {
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	updateTestDesired(t, c, "room-a", preparationMeetingID)
+
+	if _, err := c.advanceAndStart(context.Background(), "room-a"); !errors.Is(err, errReconciliationNotActive) {
+		t.Fatalf("suspended advance error = %v, want reconciliation not active", err)
 	}
 }
 
@@ -796,6 +859,42 @@ func TestReconcileStartsDesiredDespiteGotoFailureThenPausesOld(t *testing.T) {
 	view := roomViewByName(t, c.snapshotRooms(), "room-a")
 	if view.Summary != "Converged" || view.SummaryReason != "DesiredMeetingSoleInProgress" || !slices.Equal(view.ActiveMeetingIDs, []string{"meeting-new"}) {
 		t.Fatalf("converged view = %#v", view)
+	}
+}
+
+func TestPreparationMeetingConvergesWithoutCommandsForAnyActiveSet(t *testing.T) {
+	var commands atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Query().Get("status") == "in_progress" {
+			writeJSON(t, writer, map[string]any{
+				"data": []any{
+					meetingPayload("meeting-old", "in_progress", 1),
+					meetingPayload("meeting-other", "in_progress", 2),
+				},
+				"links": map[string]any{"next": nil},
+			})
+			return
+		}
+		if request.Method == http.MethodPost {
+			commands.Add(1)
+		}
+		writer.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	a := newTestApp(t, map[string]string{"room-a": "token-a"})
+	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
+	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	updateTestDesired(t, c, "room-a", preparationMeetingID)
+	room, run, _ := activateTestRoom(t, c, "room-a")
+
+	c.reconcileRound(room, run)
+	view := roomViewByName(t, c.snapshotRooms(), "room-a")
+	if view.Summary != "Converged" || view.SummaryReason != "PreparationMeeting" || view.DesiredStatus != "in_progress" {
+		t.Fatalf("preparation view = %#v", view)
+	}
+	if !slices.Equal(view.ActiveMeetingIDs, []string{"meeting-old", "meeting-other"}) || commands.Load() != 0 {
+		t.Fatalf("preparation active/commands = %#v/%d", view.ActiveMeetingIDs, commands.Load())
 	}
 }
 

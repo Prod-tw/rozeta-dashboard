@@ -214,7 +214,7 @@ func TestLoginUsesSafeRedirect(t *testing.T) {
 	}
 }
 
-func TestSetupArtifactsUseFirstRoomMeeting(t *testing.T) {
+func TestSetupArtifactsSkipPreparationMeeting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
 	a.controller = &controller{
@@ -222,7 +222,7 @@ func TestSetupArtifactsUseFirstRoomMeeting(t *testing.T) {
 		rooms: map[string]*controllerRoom{
 			"room-a": {
 				name:     "room-a",
-				meetings: []roomMeetingView{{ID: "meeting-first"}, {ID: "meeting-second"}},
+				meetings: []roomMeetingView{preparationMeeting(), {ID: "meeting-first"}, {ID: "meeting-second"}},
 			},
 		},
 	}

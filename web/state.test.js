@@ -263,11 +263,12 @@ test('meeting dates use the browser local calendar date and sort chronologically
 
 test('meeting list filtering keeps only meetings for the selected date', () => {
 	const meetings = [
+		{ id: 'preparation', virtual: true, title: '準備' },
 		{ id: 'day-two', scheduled_start: '2026-08-09T09:00:00+08:00' },
 		{ id: 'day-one', scheduled_start: '2026-08-08T09:00:00+08:00' },
 	]
-	assert.deepEqual(meetingsForDate(meetings, '2026-08-08'), [meetings[1]])
-	assert.deepEqual(meetingsForDate(meetings, '2026-08-10'), [])
+	assert.deepEqual(meetingsForDate(meetings, '2026-08-08'), [meetings[0], meetings[2]])
+	assert.deepEqual(meetingsForDate(meetings, '2026-08-10'), [meetings[0]])
 })
 
 test('schedule alert uses the next meeting, room offset, and inclusive threshold', () => {

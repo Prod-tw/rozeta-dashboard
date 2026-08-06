@@ -158,6 +158,7 @@ func (c *controller) resetReadyPreflight(ctx context.Context, roomName, epoch st
 	if err != nil {
 		return c.snapshotRoom(room), nil, err
 	}
+	meetings = withoutVirtualMeetings(meetings)
 	view := c.recordResetObservation(room, active, true)
 	return view, meetings, nil
 }
@@ -212,6 +213,7 @@ func (c *controller) resetReadyRoom(ctx context.Context, roomName, epoch string,
 	if err != nil {
 		return c.snapshotRoom(room), nil, err
 	}
+	meetings = withoutVirtualMeetings(meetings)
 	ids := meetingIDs(meetings)
 	wanted := append([]string{}, expectedMeetingIDs...)
 	sort.Strings(wanted)
