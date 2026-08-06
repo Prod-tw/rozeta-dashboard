@@ -29,10 +29,6 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const (
-	roomSyncConcurrency = 6
-)
-
 type app struct {
 	ctx              context.Context
 	state            *state
@@ -157,17 +153,25 @@ func newApp(ctx context.Context, tokens map[string]string, adminPassword string,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxConnsPerHost = 64
+	transport.MaxIdleConns = 64
+	transport.MaxIdleConnsPerHost = 32
+	transport.ResponseHeaderTimeout = 10 * time.Second
 	a := &app{
 		ctx:             ctx,
 		state:           newState(),
 		tokenStore:      tokens,
 		meetingSchedule: meetingSchedule{starts: make(map[string]time.Time), snapshots: make(map[string][]roomMeetingView)},
 		rozetaBaseURL:   "https://rozeta.app",
-		httpClient:      &http.Client{Timeout: 15 * time.Second},
-		adminPassword:   adminPassword,
-		sessionSecret:   sessionSecret,
-		loginLimiter:    newLoginLimiter(),
-		epoch:           newProcessEpoch(),
+		// The controller has separate bounded pools for observations and controls.
+		// This transport keeps enough reusable connections for both pools without
+		// allowing an unbounded number of sockets to hide remote backpressure.
+		httpClient:    &http.Client{Transport: transport, Timeout: 15 * time.Second},
+		adminPassword: adminPassword,
+		sessionSecret: sessionSecret,
+		loginLimiter:  newLoginLimiter(),
+		epoch:         newProcessEpoch(),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,

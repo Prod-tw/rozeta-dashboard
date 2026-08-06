@@ -19,9 +19,20 @@ import (
 
 const (
 	controllerStateVersion  = 2
-	reconcileInterval       = 5 * time.Second
+	reconcileInterval       = 2 * time.Second
 	reconcileRequestTimeout = 12 * time.Second
 	stopDrainTimeout        = 30 * time.Second
+
+	// WHY: thirty active rooms generate fifteen observation requests per second at
+	// the two-second freshness target. The old six-worker mixed pool allowed those
+	// observations to consume the workers needed by lifecycle commands. Separate,
+	// bounded pools now keep observations from starving control and reset work.
+	observationWorkerCount = 16
+	controlWorkerCount     = 8
+	resetWorkerCount       = 2
+	observationQueueSize   = 128
+	controlQueueSize       = 64
+	resetQueueSize         = 32
 )
 
 type reconciliationState string
@@ -115,6 +126,7 @@ type requestPriority uint8
 const (
 	observationRequest requestPriority = iota
 	controlRequest
+	resetRequest
 )
 
 type requestJob struct {
@@ -122,14 +134,16 @@ type requestJob struct {
 	run func(context.Context)
 }
 
-// WHY: remote calls need a global cap without allowing pagination to starve controls.
-// Previously observations and controls competed for one semaphore; now two of six
-// workers are control-only and the mixed workers always prefer queued controls.
+// WHY: remote calls need bounded, independent capacity by work type. Previously
+// observations and controls competed for one six-worker pool, so increasing
+// observation frequency could delay lifecycle commands. Dedicated queues now
+// preserve control capacity while keeping reset/resume work bounded separately.
 type requestScheduler struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	control chan requestJob
 	observe chan requestJob
+	reset   chan requestJob
 	wg      sync.WaitGroup
 }
 
@@ -137,13 +151,18 @@ func newRequestScheduler(parent context.Context) *requestScheduler {
 	ctx, cancel := context.WithCancel(parent)
 	scheduler := &requestScheduler{
 		ctx: ctx, cancel: cancel,
-		control: make(chan requestJob), observe: make(chan requestJob),
+		control: make(chan requestJob, controlQueueSize),
+		observe: make(chan requestJob, observationQueueSize),
+		reset:   make(chan requestJob, resetQueueSize),
 	}
-	for range 2 {
+	for range controlWorkerCount {
 		scheduler.wg.Go(scheduler.runControl)
 	}
-	for range roomSyncConcurrency - 2 {
-		scheduler.wg.Go(scheduler.runMixed)
+	for range observationWorkerCount {
+		scheduler.wg.Go(scheduler.runObservation)
+	}
+	for range resetWorkerCount {
+		scheduler.wg.Go(scheduler.runReset)
 	}
 	return scheduler
 }
@@ -154,32 +173,23 @@ func (s *requestScheduler) close() {
 }
 
 func (s *requestScheduler) runControl() {
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case job := <-s.control:
-			job.run(job.ctx)
-		}
-	}
+	s.run(s.control)
 }
 
-func (s *requestScheduler) runMixed() {
+func (s *requestScheduler) runObservation() {
+	s.run(s.observe)
+}
+
+func (s *requestScheduler) runReset() {
+	s.run(s.reset)
+}
+
+func (s *requestScheduler) run(queue <-chan requestJob) {
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case job := <-s.control:
-			job.run(job.ctx)
-			continue
-		default:
-		}
-		select {
-		case <-s.ctx.Done():
-			return
-		case job := <-s.control:
-			job.run(job.ctx)
-		case job := <-s.observe:
+		case job := <-queue:
 			job.run(job.ctx)
 		}
 	}
@@ -202,8 +212,11 @@ func runScheduled[T any](ctx context.Context, scheduler *requestScheduler, prior
 		}
 	}}
 	queue := scheduler.observe
-	if priority == controlRequest {
+	switch priority {
+	case controlRequest:
 		queue = scheduler.control
+	case resetRequest:
+		queue = scheduler.reset
 	}
 	select {
 	case <-ctx.Done():
@@ -211,6 +224,11 @@ func runScheduled[T any](ctx context.Context, scheduler *requestScheduler, prior
 	case <-scheduler.ctx.Done():
 		return zero, scheduler.ctx.Err()
 	case queue <- job:
+	default:
+		// A bounded queue must reject excess work instead of turning backpressure
+		// into an unbounded HTTP or room-actor wait. Observation callers retry on
+		// their next tick; control callers surface this as an explicit failure.
+		return zero, errRequestQueueFull
 	}
 	select {
 	case <-ctx.Done():
@@ -459,6 +477,7 @@ type preflightResult struct {
 
 var (
 	errReconciliationConflict  = errors.New("reconciliation state conflict")
+	errRequestQueueFull        = errors.New("request scheduler queue is full")
 	errInvalidReconciliation   = errors.New("invalid reconciliation request")
 	errConfirmationRequired    = errors.New("explicit confirmation is required")
 	errGenerationConflict      = errors.New("desired state generation conflict")

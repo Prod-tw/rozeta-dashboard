@@ -296,7 +296,7 @@ func (c *controller) resetReadyMeeting(ctx context.Context, room *controllerRoom
 }
 
 func (c *controller) resetResume(ctx context.Context, room *controllerRoom, meetingID string, run, generation uint64) error {
-	_, err := runScheduled(ctx, c.scheduler, controlRequest, func(requestCtx context.Context) (struct{}, error) {
+	_, err := runScheduled(ctx, c.scheduler, resetRequest, func(requestCtx context.Context) (struct{}, error) {
 		c.mu.RLock()
 		current := room.reconciliationRun == run && room.desired.Generation == generation && room.lifecycle == reconciliationSuspended && room.resetting
 		c.mu.RUnlock()

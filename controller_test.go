@@ -386,6 +386,149 @@ func TestRoomActorIsSerialAndWakeIsCoalesced(t *testing.T) {
 	}
 }
 
+func TestRequestSchedulerServesThirtyObservations(t *testing.T) {
+	scheduler := newRequestScheduler(context.Background())
+	defer scheduler.close()
+
+	var concurrent atomic.Int32
+	var maximum atomic.Int32
+	var completed atomic.Int32
+	var workers sync.WaitGroup
+	for range 30 {
+		workers.Go(func() {
+			_, err := runScheduled(context.Background(), scheduler, observationRequest, func(context.Context) (struct{}, error) {
+				current := concurrent.Add(1)
+				defer concurrent.Add(-1)
+				for {
+					old := maximum.Load()
+					if current <= old || maximum.CompareAndSwap(old, current) {
+						break
+					}
+				}
+				time.Sleep(2 * time.Millisecond)
+				completed.Add(1)
+				return struct{}{}, nil
+			})
+			if err != nil {
+				t.Errorf("observation failed: %v", err)
+			}
+		})
+	}
+	workers.Wait()
+
+	if completed.Load() != 30 {
+		t.Fatalf("completed observations = %d, want 30", completed.Load())
+	}
+	if maximum.Load() > observationWorkerCount {
+		t.Fatalf("maximum observation concurrency = %d, want at most %d", maximum.Load(), observationWorkerCount)
+	}
+}
+
+func TestRequestSchedulerControlsDoNotWaitForObservations(t *testing.T) {
+	scheduler := newRequestScheduler(context.Background())
+	defer scheduler.close()
+
+	releaseObservations := make(chan struct{})
+	enteredObservations := make(chan struct{}, observationWorkerCount)
+	var observationWorkers sync.WaitGroup
+	for range observationWorkerCount {
+		observationWorkers.Go(func() {
+			_, err := runScheduled(context.Background(), scheduler, observationRequest, func(context.Context) (struct{}, error) {
+				enteredObservations <- struct{}{}
+				<-releaseObservations
+				return struct{}{}, nil
+			})
+			if err != nil {
+				t.Errorf("observation failed: %v", err)
+			}
+		})
+	}
+	waitUntil := func(count func() bool) bool {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if count() {
+				return true
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return count()
+	}
+	if !waitUntil(func() bool { return len(enteredObservations) == observationWorkerCount }) {
+		close(releaseObservations)
+		observationWorkers.Wait()
+		t.Fatal("observation workers did not all start")
+	}
+
+	controlsStarted := make(chan struct{}, controlWorkerCount)
+	var controlWorkers sync.WaitGroup
+	for range controlWorkerCount {
+		controlWorkers.Go(func() {
+			_, err := runScheduled(context.Background(), scheduler, controlRequest, func(context.Context) (struct{}, error) {
+				controlsStarted <- struct{}{}
+				return struct{}{}, nil
+			})
+			if err != nil {
+				t.Errorf("control failed: %v", err)
+			}
+		})
+	}
+	if !waitUntil(func() bool { return len(controlsStarted) == controlWorkerCount }) {
+		close(releaseObservations)
+		observationWorkers.Wait()
+		controlWorkers.Wait()
+		t.Fatal("control workers waited for observations")
+	}
+
+	close(releaseObservations)
+	observationWorkers.Wait()
+	controlWorkers.Wait()
+}
+
+func TestDifferentRoomsDispatchControlsConcurrently(t *testing.T) {
+	var concurrent atomic.Int32
+	var maximum atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/api/v1/commands" {
+			http.NotFound(writer, request)
+			return
+		}
+		current := concurrent.Add(1)
+		defer concurrent.Add(-1)
+		for {
+			old := maximum.Load()
+			if current <= old || maximum.CompareAndSwap(old, current) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		writeJSON(t, writer, map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	a := newTestApp(t, map[string]string{"room-a": "token-a", "room-b": "token-b"})
+	a.rozetaBaseURL, a.httpClient = server.URL, server.Client()
+	c := newTestController(t, a, filepath.Join(t.TempDir(), "state.json"))
+	roomA, runA, generationA := activateTestRoom(t, c, "room-a")
+	roomB, runB, generationB := activateTestRoom(t, c, "room-b")
+
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		if err := c.controlOnce(roomA, runA, generationA, reconciliationActive, "start_meeting", "meeting-a"); err != nil {
+			t.Errorf("room-a control failed: %v", err)
+		}
+	})
+	workers.Go(func() {
+		if err := c.controlOnce(roomB, runB, generationB, reconciliationActive, "start_meeting", "meeting-b"); err != nil {
+			t.Errorf("room-b control failed: %v", err)
+		}
+	})
+	workers.Wait()
+
+	if maximum.Load() != 2 {
+		t.Fatalf("maximum cross-room control concurrency = %d, want 2", maximum.Load())
+	}
+}
+
 func TestSuspendedDesiredUpdatePersistsWithoutRemoteRequest(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
