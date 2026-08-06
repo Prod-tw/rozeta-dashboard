@@ -118,10 +118,10 @@ func stopPreflightFacts(activeMeetingIDs []string) *preflightFacts {
 	return &preflightFacts{ActiveMeetingIDs: &activeMeetingIDs}
 }
 
-func TestDesiredStateFileV2AndAtomicV1Migration(t *testing.T) {
-	t.Run("loads v2 consumed resume", func(t *testing.T) {
+func TestDesiredStateFileV3AndRejectsOlderVersions(t *testing.T) {
+	t.Run("loads v3 consumed resume and offset", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "state.json")
-		data := `{"version":2,"rooms":{"room-a":{"meeting_id":"meeting-a","generation":3,"consumed_resume":{"generation":3,"completed_updated_at":"2026-08-04T01:02:03Z"}}}}`
+		data := `{"version":3,"rooms":{"room-a":{"meeting_id":"meeting-a","generation":3,"schedule_offset_minutes":10,"consumed_resume":{"generation":3,"completed_updated_at":"2026-08-04T01:02:03Z"}}}}`
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -129,46 +129,27 @@ func TestDesiredStateFileV2AndAtomicV1Migration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if consumed := file.Rooms["room-a"].ConsumedResume; consumed == nil || consumed.Generation != 3 {
-			t.Fatalf("consumed resume = %#v", consumed)
+		if consumed := file.Rooms["room-a"].ConsumedResume; consumed == nil || consumed.Generation != 3 || file.Rooms["room-a"].ScheduleOffsetMinutes != 10 {
+			t.Fatalf("loaded state = %#v", file)
 		}
 	})
 
-	t.Run("migrates v1 without restoring running", func(t *testing.T) {
-		directory := t.TempDir()
-		path := filepath.Join(directory, "state.json")
-		legacy := `{"version":1,"rooms":{"room-a":{"meeting_id":"meeting-a","generation":7,"running":true}}}`
-		if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+	t.Run("rejects older state without migration", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, []byte(`{"version":2,"rooms":{}}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		file, err := loadDesiredStateFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if file.Version != 2 || file.Rooms["room-a"].MeetingID != "meeting-a" || file.Rooms["room-a"].Generation != 7 {
-			t.Fatalf("migrated state = %#v", file)
-		}
-		persisted, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Contains(persisted, []byte(`"running"`)) || !bytes.Contains(persisted, []byte(`"version": 2`)) {
-			t.Fatalf("persisted migration = %s", persisted)
-		}
-		entries, err := os.ReadDir(directory)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 1 || entries[0].Name() != "state.json" {
-			t.Fatalf("migration left temporary files: %#v", entries)
+		if _, err := loadDesiredStateFile(path); err == nil {
+			t.Fatal("loadDesiredStateFile() error = nil")
 		}
 	})
 
 	t.Run("rejects malformed and unsupported state", func(t *testing.T) {
 		for name, data := range map[string]string{
-			"malformed":    `{"version":2,"rooms":`,
-			"unsupported":  `{"version":99,"rooms":{}}`,
-			"invalid room": `{"version":2,"rooms":{"room-a":{"meeting_id":"","generation":0}}}`,
+			"malformed":      `{"version":3,"rooms":`,
+			"unsupported":    `{"version":99,"rooms":{}}`,
+			"invalid room":   `{"version":3,"rooms":{"room-a":{"meeting_id":"","generation":1}}}`,
+			"invalid offset": `{"version":3,"rooms":{"room-a":{"meeting_id":"meeting-a","generation":1,"schedule_offset_minutes":121}}}`,
 		} {
 			t.Run(name, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "state.json")
@@ -209,6 +190,46 @@ func TestSelectCurrentMeeting(t *testing.T) {
 				t.Fatalf("selectCurrentMeeting() = %#v, want %#v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestScheduleOffsetPersistsWithRevisionFence(t *testing.T) {
+	app := newTestApp(t, map[string]string{"room-a": "token-a"})
+	path := filepath.Join(t.TempDir(), "state.json")
+	controller := newTestController(t, app, path)
+	view := roomViewByName(t, controller.snapshotRooms(), "room-a")
+	updated, err := controller.updateScheduleOffset("room-a", scheduleOffsetUpdate{
+		Minutes: 10, ExpectedEpoch: app.epoch, ExpectedRun: view.ReconciliationRun,
+		ExpectedGeneration: view.Generation, ExpectedRevision: view.Revision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ScheduleOffsetMinutes != 10 {
+		t.Fatalf("offset = %d, want 10", updated.ScheduleOffsetMinutes)
+	}
+	updated, err = controller.updateDesired("room-a", desiredStateUpdate{
+		MeetingID: "meeting-a", ExpectedEpoch: app.epoch,
+		ExpectedRun: updated.ReconciliationRun, ExpectedGeneration: updated.Generation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ScheduleOffsetMinutes != 10 {
+		t.Fatalf("offset after desired update = %d, want 10", updated.ScheduleOffsetMinutes)
+	}
+	if _, err := controller.updateScheduleOffset("room-a", scheduleOffsetUpdate{
+		Minutes: 5, ExpectedEpoch: app.epoch, ExpectedRun: view.ReconciliationRun,
+		ExpectedGeneration: view.Generation, ExpectedRevision: view.Revision,
+	}); !errors.Is(err, errGenerationConflict) {
+		t.Fatalf("stale update error = %v, want generation conflict", err)
+	}
+	reloaded, err := loadDesiredStateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Rooms["room-a"].ScheduleOffsetMinutes != 10 {
+		t.Fatalf("persisted offset = %d, want 10", reloaded.Rooms["room-a"].ScheduleOffsetMinutes)
 	}
 }
 

@@ -96,6 +96,19 @@ a {
 	margin-inline: auto;
 }
 
+.test-clock-banner {
+	border: 1px solid var(--control-warn);
+	border-radius: 10px;
+	padding: 10px 14px;
+	background: var(--control-warn-soft);
+	color: var(--control-text);
+	font-weight: 800;
+}
+
+.test-clock-banner[hidden] {
+	display: none;
+}
+
 .control-header {
 	display: flex;
 	align-items: center;
@@ -188,6 +201,18 @@ a {
 .utility-menu button:hover,
 .utility-menu a:hover {
 	background: var(--control-surface-muted);
+}
+
+.utility-toggle {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0.75rem;
+	font-size: 0.9rem;
+}
+
+.utility-toggle input {
+	accent-color: var(--control-accent);
 }
 
 .control-shell {
@@ -365,6 +390,80 @@ a {
 	padding: 14px;
 	border-radius: 12px;
 	background: var(--control-surface-muted);
+}
+
+.schedule-controls {
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 16px;
+	margin-top: 16px;
+	padding-top: 16px;
+	border-top: 1px solid var(--control-line);
+}
+
+.schedule-controls strong {
+	display: block;
+	margin-bottom: 4px;
+}
+
+.schedule-inputs {
+	display: flex;
+	align-items: flex-end;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.schedule-inputs label {
+	display: grid;
+	gap: 4px;
+	color: var(--control-muted);
+	font-size: 0.78rem;
+	font-weight: 700;
+}
+
+.schedule-inputs input {
+	width: 96px;
+	min-height: 44px;
+	border: 1px solid var(--control-line);
+	border-radius: 8px;
+	padding: 0.65rem;
+	background: var(--control-bg);
+	color: var(--control-text);
+}
+
+.schedule-alert {
+	display: grid;
+	gap: 4px;
+	margin-bottom: 16px;
+	border: 1px solid var(--control-warn);
+	border-radius: 10px;
+	padding: 12px 14px;
+	background: var(--control-warn-soft);
+	color: var(--control-text);
+}
+
+.schedule-alert span {
+	color: var(--control-muted);
+}
+
+.test-clock-field {
+	display: grid;
+	gap: 6px;
+	margin-top: 16px;
+	color: var(--control-muted);
+	font-size: 0.85rem;
+	font-weight: 700;
+}
+
+.test-clock-field input {
+	min-height: 44px;
+	border: 1px solid var(--control-line);
+	border-radius: 8px;
+	padding: 0.65rem;
+	background: var(--control-bg);
+	color: var(--control-text);
 }
 
 .agenda-summary span,

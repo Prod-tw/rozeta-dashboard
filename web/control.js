@@ -3,14 +3,18 @@ import {
 	canEditDesired,
 	cloneReconciliationTargets,
 	confirmationTargets,
+	createClientClock,
 	isCurrentVersion,
 	meetingsForDate,
+	defaultAlertThresholdMinutes,
+	evaluateScheduleAlert,
 	reconcileAuthoritativeRooms,
 	reconciliationActionFor,
 	reconciliationRequestBody,
 	reconciliationTargets,
 	roomNameIncludes,
 	shouldAcceptSnapshot,
+	testClockParameter,
 	visibleRooms,
 } from './state.js'
 
@@ -35,11 +39,19 @@ const state = {
 	socketSequence: 0,
 	messages: [],
 	lastRoomStates: new Map(),
+	alertEnabled: false,
+	alertThresholds: new Map(),
+	activeAlerts: new Map(),
+	notifiedAlerts: new Set(),
+	serviceWorkerRegistration: null,
+	clientClock: createClientClock(window.location.search),
 }
 
 const roomGrid = document.getElementById('rooms-grid')
 const selectedRoomTabs = document.getElementById('selected-room-tabs')
 const operatorContent = document.getElementById('operator-content')
+const operatorAlert = document.getElementById('operator-alert')
+const testClockBanner = document.getElementById('test-clock-banner')
 const operatorStatus = document.getElementById('operator-status')
 const roomSearch = document.getElementById('room-search')
 const eventDaySelect = document.getElementById('event-day-select')
@@ -49,9 +61,13 @@ const messageCount = document.getElementById('message-count')
 const actionDialog = document.getElementById('action-dialog')
 const agendaDialog = document.getElementById('agenda-dialog')
 const roomPickerDialog = document.getElementById('room-picker-dialog')
+const testClockDialog = document.getElementById('test-clock-dialog')
+const testClockInput = document.getElementById('test-clock-input')
 
 const visibilityStorageKey = 'coscup-caption.admin-room-visibility.v1'
 const operationRoomStorageKey = 'coscup-caption.control-operation-room.v1'
+const alertEnabledStorageKey = 'coscup-caption.schedule-alerts-enabled.v1'
+const alertThresholdStorageKey = 'coscup-caption.schedule-alert-thresholds.v1'
 
 document.getElementById('menu-button').addEventListener('click', toggleUtilityMenu)
 document.getElementById('messages-button').addEventListener('click', openMessages)
@@ -68,6 +84,18 @@ document.getElementById('agenda-confirm').addEventListener('click', () => void c
 document.getElementById('start-all').addEventListener('click', () => void openBulkAction('start'))
 document.getElementById('stop-all').addEventListener('click', () => void openBulkAction('stop'))
 document.getElementById('force-stop-all').addEventListener('click', () => void openBulkAction('force-stop'))
+document.getElementById('alert-enabled').addEventListener('change', event => {
+	state.alertEnabled = event.target.checked
+	storeAlertPreferences()
+	refreshAlerts(true)
+	if (state.alertEnabled) void ensureServiceWorker()
+})
+document.getElementById('test-clock-button').addEventListener('click', openTestClockDialog)
+document.getElementById('test-clock-form').addEventListener('submit', event => {
+	event.preventDefault()
+	applyTestClock()
+})
+document.getElementById('test-clock-clear').addEventListener('click', clearTestClock)
 actionDialog.addEventListener('close', () => {
 	state.pendingAction = null
 	state.pendingReset = null
@@ -189,6 +217,115 @@ function recordRoomChanges(room) {
 	)
 }
 
+function refreshAlerts() {
+	// WHY: alert thresholds and notification state are operator-local preferences. The
+	// server only supplies room observations and the persisted offset, so each browser
+	// can decide independently whether a selected room needs attention.
+	if (!state.alertEnabled) {
+		state.activeAlerts.clear()
+		state.notifiedAlerts.clear()
+		renderOperatorAlert()
+		return
+	}
+	const selected = new Set(getVisibleRooms().map(room => room.room_name))
+	for (const roomName of state.activeAlerts.keys()) {
+		if (!selected.has(roomName)) state.activeAlerts.delete(roomName)
+	}
+	for (const room of getVisibleRooms()) {
+		const alert = evaluateScheduleAlert(
+			room,
+			state.meetings.get(room.room_name) || room.meetings || [],
+			state.clientClock.now(),
+			alertThresholdForRoom(room.room_name),
+		)
+		const previous = state.activeAlerts.get(room.room_name)
+		if (!alert) {
+			state.activeAlerts.delete(room.room_name)
+			if (previous) state.notifiedAlerts.delete(previous.key)
+			continue
+		}
+		state.activeAlerts.set(room.room_name, alert)
+		if (previous?.key === alert.key || state.notifiedAlerts.has(alert.key)) continue
+		state.notifiedAlerts.add(alert.key)
+		alert.testMode = state.clientClock.enabled
+		addMessage('error', room.room_name, `下一個議程已達切換提醒：${alert.meetingTitle}`)
+		void notifyScheduleAlert(alert)
+	}
+	renderOperatorAlert()
+}
+
+function openTestClockDialog() {
+	testClockInput.value = localDateTimeValue(state.clientClock.now())
+	testClockDialog.showModal()
+}
+
+function applyTestClock() {
+	const value = testClockInput.value
+	const date = new Date(value)
+	if (!value || Number.isNaN(date.getTime())) {
+		showToast('請輸入有效的測試時間。')
+		return
+	}
+	const url = new URL(window.location.href)
+	url.searchParams.set(testClockParameter, date.toISOString())
+	window.location.assign(`${url.pathname}${url.search}${url.hash}`)
+}
+
+function clearTestClock() {
+	const url = new URL(window.location.href)
+	url.searchParams.delete(testClockParameter)
+	window.location.assign(`${url.pathname}${url.search}${url.hash}`)
+}
+
+function localDateTimeValue(date) {
+	const timezoneOffset = date.getTimezoneOffset() * 60_000
+	return new Date(date.getTime() - timezoneOffset).toISOString().slice(0, 16)
+}
+
+function renderTestClockBanner() {
+	if (!state.clientClock.enabled) {
+		testClockBanner.hidden = true
+		testClockBanner.textContent = ''
+		return
+	}
+	testClockBanner.hidden = false
+	testClockBanner.textContent = `測試時間模式：${formatTime(state.clientClock.now())}`
+}
+
+async function ensureServiceWorker() {
+	if (!('serviceWorker' in navigator)) return null
+	if (state.serviceWorkerRegistration) return state.serviceWorkerRegistration
+	try {
+		state.serviceWorkerRegistration = await navigator.serviceWorker.register('/service-worker.js')
+		return state.serviceWorkerRegistration
+	} catch {
+		showToast('瀏覽器無法啟用背景通知服務。')
+		return null
+	}
+}
+
+async function enableSystemNotifications() {
+	if (!('Notification' in window)) {
+		showToast('此瀏覽器不支援系統通知。')
+		return
+	}
+	const permission =
+		Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
+	if (permission !== 'granted') {
+		showToast('系統通知權限未啟用。')
+		return
+	}
+	await ensureServiceWorker()
+	showToast('系統通知已啟用。')
+	refreshAlerts()
+}
+
+async function notifyScheduleAlert(alert) {
+	if (!('Notification' in window) || Notification.permission !== 'granted') return
+	const registration = await ensureServiceWorker()
+	registration?.active?.postMessage({ type: 'show-schedule-alert', alert })
+}
+
 function ensureOperationRoom() {
 	const visible = getVisibleRooms()
 	if (state.operationRoom && visible.some(room => room.room_name === state.operationRoom)) return
@@ -203,8 +340,10 @@ function render() {
 	renderSelectedRooms()
 	renderRooms()
 	renderOperator()
+	renderOperatorAlert()
 	renderMessages()
 	updateConnectionState()
+	renderTestClockBanner()
 }
 
 function renderSelectedRooms() {
@@ -286,12 +425,20 @@ function renderOperator() {
 	operatorStatus.textContent = translateLifecycle(room.lifecycle)
 	const meetings = meetingsForDate(state.meetings.get(room.room_name), state.selectedDate)
 	const action = reconciliationActionFor(room)
+	const threshold = alertThresholdForRoom(room.room_name)
 	operatorContent.innerHTML = `<div class="operator-card">
 		<div class="operator-card-header"><div><h3>${escapeHtml(room.room_name)}</h3><p class="room-meta">${escapeHtml(room.summary || '等待伺服器狀態')}</p></div><span class="status-label ${statusClass(room)}">${escapeHtml(translateLifecycle(room.lifecycle))}</span></div>
 		<div class="agenda-summary"><span>目前議程</span><strong>${escapeHtml(room.desired_meeting_id ? meetingTitle(room.room_name, room.desired_meeting_id) : '尚未設定議程')}</strong><span>${escapeHtml(room.desired_meeting_id || '請從下方選擇議程')}</span></div>
+		<div class="schedule-controls"><div><strong>議程時間校正</strong><p class="room-meta">正數代表延遲，負數代表提前。</p></div><div class="schedule-inputs"><label>偏差（分鐘）<input type="number" min="-120" max="120" step="1" value="${Number(room.schedule_offset_minutes || 0)}" data-schedule-offset /></label><label>警報門檻（分鐘）<input type="number" min="0" max="120" step="1" value="${threshold}" data-alert-threshold /></label><button type="button" class="secondary-button" data-save-schedule-settings ${state.requestPending || !state.connected ? 'disabled' : ''}>套用</button><button type="button" class="secondary-button" data-enable-notifications>啟用系統通知</button></div></div>
 		<div class="operator-actions"><button type="button" class="secondary-button" data-agenda-toggle ${state.requestPending || !state.connected ? 'disabled' : ''}>切換議程</button>${action ? `<button type="button" class="${action === 'force-stop' ? 'danger-button' : 'primary-button'}" data-room-action="${action}" data-room-name="${escapeAttr(room.room_name)}" ${state.requestPending || !state.connected ? 'disabled' : ''}>${action === 'start' ? '開始教室' : action === 'stop' ? '停止教室' : '強制停止教室'}</button>` : '<button type="button" disabled>處理中</button>'}</div>
 		<div class="agenda-list" id="agenda-list" hidden>${meetings.length ? meetings.map(meetingMarkup).join('') : '<p class="room-meta">目前沒有可選擇的議程。</p>'}</div>
 	</div>`
+	operatorContent
+		.querySelector('[data-save-schedule-settings]')
+		.addEventListener('click', () => void saveScheduleSettings(room))
+	operatorContent
+		.querySelector('[data-enable-notifications]')
+		.addEventListener('click', () => void enableSystemNotifications())
 	operatorContent.querySelector('[data-agenda-toggle]').addEventListener('click', () => {
 		const list = document.getElementById('agenda-list')
 		list.hidden = !list.hidden
@@ -307,6 +454,94 @@ function renderOperator() {
 	operatorContent
 		.querySelectorAll('[data-agenda-id]')
 		.forEach(button => button.addEventListener('click', () => openAgendaConfirmation(button.dataset.agendaId)))
+}
+
+function renderOperatorAlert() {
+	const alert = state.alertEnabled ? state.activeAlerts.get(state.operationRoom) : null
+	operatorAlert.innerHTML = alert
+		? `<div class="schedule-alert"><strong>下一個議程需要確認</strong><span>${escapeHtml(alert.meetingTitle)} 預定 ${escapeHtml(formatTime(alert.scheduledStart))}，校正後為 ${escapeHtml(formatTime(alert.adjustedStart))}，已達警報門檻。</span></div>`
+		: ''
+}
+
+function alertThresholdForRoom(roomName) {
+	return state.alertThresholds.get(roomName) ?? defaultAlertThresholdMinutes
+}
+
+function saveAlertPreferences() {
+	try {
+		window.localStorage.setItem(alertEnabledStorageKey, JSON.stringify(state.alertEnabled))
+		window.localStorage.setItem(alertThresholdStorageKey, JSON.stringify(Object.fromEntries(state.alertThresholds)))
+	} catch {
+		showToast('無法儲存警報設定，重新整理後可能會遺失。')
+	}
+}
+
+function storeAlertPreferences() {
+	saveAlertPreferences()
+	document.getElementById('alert-enabled').checked = state.alertEnabled
+}
+
+function loadAlertPreferences() {
+	try {
+		state.alertEnabled = window.localStorage.getItem(alertEnabledStorageKey) === 'true'
+		const thresholds = JSON.parse(window.localStorage.getItem(alertThresholdStorageKey) || '{}')
+		if (thresholds && typeof thresholds === 'object') {
+			for (const [roomName, value] of Object.entries(thresholds)) {
+				if (Number.isInteger(value) && value >= 0 && value <= 120) state.alertThresholds.set(roomName, value)
+			}
+		}
+	} catch {
+		showToast('無法載入警報設定，將使用預設值。')
+	}
+	document.getElementById('alert-enabled').checked = state.alertEnabled
+}
+
+async function saveScheduleSettings(room) {
+	const offsetInput = operatorContent.querySelector('[data-schedule-offset]')
+	const thresholdInput = operatorContent.querySelector('[data-alert-threshold]')
+	const minutes = Number(offsetInput.value)
+	const threshold = Number(thresholdInput.value)
+	if (
+		!Number.isInteger(minutes) ||
+		minutes < -120 ||
+		minutes > 120 ||
+		!Number.isInteger(threshold) ||
+		threshold < 0 ||
+		threshold > 120
+	) {
+		showToast('偏差必須是 -120 到 120 的整數，警報門檻必須是 0 到 120 的整數。')
+		return
+	}
+	state.alertThresholds.set(room.room_name, threshold)
+	saveAlertPreferences()
+	state.requestPending = true
+	render()
+	try {
+		const response = await apiFetch(
+			`/api/rooms/${encodeURIComponent(room.room_name)}/schedule-offset`,
+			{
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					minutes,
+					epoch: state.epoch,
+					expected_reconciliation_run: Number(room.reconciliation_run || 0),
+					expected_generation: Number(room.generation || 0),
+					expected_revision: Number(room.revision || 0),
+				}),
+			},
+			[409],
+		)
+		const body = await response.json().catch(() => ({}))
+		if (response.status === 409) throw new Error(body.error || '教室狀態已更新，請重新確認。')
+		applyRoom(body)
+		refreshAlerts(true)
+	} catch (error) {
+		showToast(error.message || String(error))
+	} finally {
+		state.requestPending = false
+		render()
+	}
 }
 
 function meetingMarkup(meeting) {
@@ -762,6 +997,16 @@ function connectSocket() {
 	})
 }
 
+navigator.serviceWorker?.addEventListener('message', event => {
+	if (
+		event.data?.type !== 'focus-room' ||
+		!state.rooms.has(event.data.roomName) ||
+		state.hiddenRooms.has(event.data.roomName)
+	)
+		return
+	selectOperationRoom(event.data.roomName)
+})
+
 function loadVisibility() {
 	try {
 		const stored = JSON.parse(window.localStorage.getItem(visibilityStorageKey) || 'null')
@@ -862,6 +1107,8 @@ function escapeAttr(value) {
 }
 
 loadVisibility()
+loadAlertPreferences()
+void ensureServiceWorker()
 loadRooms()
 	.then(() => {
 		if (state.operationRoom) void loadMeetings(state.operationRoom)
@@ -871,3 +1118,6 @@ loadRooms()
 		if (!error.authentication) showToast(error.message || String(error))
 		connectSocket()
 	})
+
+window.setInterval(refreshAlerts, 1000)
+window.setInterval(renderTestClockBanner, 1000)

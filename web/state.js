@@ -180,3 +180,80 @@ export function availableMeetingDates(meetingsByRoom) {
 export function meetingsForDate(meetings, dateKey) {
 	return (meetings || []).filter(meeting => meetingDateKey(meeting) === dateKey)
 }
+
+export const defaultAlertThresholdMinutes = 5
+export const testClockParameter = 'alert_test_at'
+
+// WHY: browser alert tests need a deterministic event date even when the host clock is
+// outside the event day. The query value anchors a client-only clock, which then advances
+// with real elapsed time instead of freezing the countdown at one instant.
+export function parseTestClockStart(search) {
+	const value = new URLSearchParams(search || '').get(testClockParameter)
+	if (!value) return null
+	const timestamp = new Date(value)
+	return Number.isNaN(timestamp.getTime()) ? null : timestamp
+}
+
+export function createClientClock(search, realStartedAt = Date.now()) {
+	const simulatedStart = parseTestClockStart(search)
+	return {
+		enabled: simulatedStart !== null,
+		simulatedStart,
+		now(realNow = Date.now()) {
+			return simulatedStart ? new Date(simulatedStart.getTime() + realNow - realStartedAt) : new Date(realNow)
+		},
+	}
+}
+
+export function nextScheduledMeeting(meetings, currentMeetingID) {
+	const ordered = (meetings || [])
+		.filter(meeting => meeting?.scheduled_start)
+		.slice()
+		.sort((left, right) => {
+			const startDifference = new Date(left.scheduled_start).getTime() - new Date(right.scheduled_start).getTime()
+			if (startDifference !== 0) return startDifference
+			const titleDifference = String(left.title || '').localeCompare(String(right.title || ''))
+			return titleDifference || String(left.id || '').localeCompare(String(right.id || ''))
+		})
+	const currentIndex = ordered.findIndex(meeting => meeting.id === currentMeetingID)
+	return currentIndex >= 0 ? ordered[currentIndex + 1] || null : null
+}
+
+export function evaluateScheduleAlert(
+	room,
+	meetings,
+	now = new Date(),
+	thresholdMinutes = defaultAlertThresholdMinutes,
+) {
+	if (
+		room?.lifecycle !== 'active' ||
+		room?.desired_status !== 'in_progress' ||
+		!room?.desired_meeting_id ||
+		!Array.isArray(room.active_meeting_ids) ||
+		room.active_meeting_ids.length !== 1 ||
+		room.active_meeting_ids[0] !== room.desired_meeting_id
+	) {
+		return null
+	}
+	const next = nextScheduledMeeting(meetings, room.desired_meeting_id)
+	const start = new Date(next?.scheduled_start || '')
+	if (!next || Number.isNaN(start.getTime())) return null
+	const offsetMinutes = Number.isFinite(Number(room.schedule_offset_minutes))
+		? Number(room.schedule_offset_minutes)
+		: 0
+	const threshold = Number.isFinite(Number(thresholdMinutes))
+		? Number(thresholdMinutes)
+		: defaultAlertThresholdMinutes
+	const alertAt = new Date(start.getTime() + (offsetMinutes + threshold) * 60_000)
+	if (now.getTime() < alertAt.getTime()) return null
+	return {
+		key: `${room.room_name}:${next.id}`,
+		roomName: room.room_name,
+		meetingID: next.id,
+		meetingTitle: next.title || next.id,
+		scheduledStart: start,
+		adjustedStart: new Date(start.getTime() + offsetMinutes * 60_000),
+		alertAt,
+		overdueMinutes: Math.max(0, Math.floor((now.getTime() - alertAt.getTime()) / 60_000)),
+	}
+}

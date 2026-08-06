@@ -8,6 +8,9 @@ import {
 	canObserve,
 	cloneReconciliationTargets,
 	confirmationTargets,
+	createClientClock,
+	defaultAlertThresholdMinutes,
+	evaluateScheduleAlert,
 	isCurrentVersion,
 	meetingDateKey,
 	meetingsForDate,
@@ -265,4 +268,77 @@ test('meeting list filtering keeps only meetings for the selected date', () => {
 	]
 	assert.deepEqual(meetingsForDate(meetings, '2026-08-08'), [meetings[1]])
 	assert.deepEqual(meetingsForDate(meetings, '2026-08-10'), [])
+})
+
+test('schedule alert uses the next meeting, room offset, and inclusive threshold', () => {
+	const room = {
+		room_name: 'room-a',
+		lifecycle: 'active',
+		desired_status: 'in_progress',
+		desired_meeting_id: 'current',
+		active_meeting_ids: ['current'],
+		schedule_offset_minutes: 10,
+	}
+	const meetings = [
+		{ id: 'next', title: 'Next', scheduled_start: '2026-08-06T12:00:00Z' },
+		{ id: 'current', title: 'Current', scheduled_start: '2026-08-06T11:00:00Z' },
+	]
+	const alert = evaluateScheduleAlert(room, meetings, new Date('2026-08-06T12:20:00Z'), 10)
+	assert.equal(alert.meetingID, 'next')
+	assert.equal(alert.adjustedStart.toISOString(), '2026-08-06T12:10:00.000Z')
+	assert.equal(alert.overdueMinutes, 0)
+})
+
+test('schedule alert applies negative offset and default threshold', () => {
+	const room = {
+		room_name: 'room-a',
+		lifecycle: 'active',
+		desired_status: 'in_progress',
+		desired_meeting_id: 'current',
+		active_meeting_ids: ['current'],
+		schedule_offset_minutes: -5,
+	}
+	const meetings = [
+		{ id: 'current', scheduled_start: '2026-08-06T11:00:00Z' },
+		{ id: 'next', scheduled_start: '2026-08-06T12:00:00Z' },
+	]
+	assert.equal(defaultAlertThresholdMinutes, 5)
+	assert.equal(evaluateScheduleAlert(room, meetings, new Date('2026-08-06T11:59:00Z')), null)
+	assert.equal(evaluateScheduleAlert(room, meetings, new Date('2026-08-06T12:00:00Z'))?.meetingID, 'next')
+})
+
+test('schedule alert is disabled unless desired is the sole active meeting', () => {
+	const room = {
+		room_name: 'room-a',
+		lifecycle: 'active',
+		desired_status: 'in_progress',
+		desired_meeting_id: 'current',
+		active_meeting_ids: ['current', 'other'],
+	}
+	assert.equal(
+		evaluateScheduleAlert(
+			room,
+			[
+				{ id: 'current', scheduled_start: '2026-08-06T11:00:00Z' },
+				{ id: 'next', scheduled_start: '2026-08-06T12:00:00Z' },
+			],
+			new Date('2026-08-06T13:00:00Z'),
+		),
+		null,
+	)
+})
+
+test('client test clock starts at the query time and continues at real-time speed', () => {
+	const clock = createClientClock('?alert_test_at=2026-08-06T12:00:00Z', 1_000)
+	assert.equal(clock.enabled, true)
+	assert.equal(clock.now(1_000).toISOString(), '2026-08-06T12:00:00.000Z')
+	assert.equal(clock.now(61_000).toISOString(), '2026-08-06T12:01:00.000Z')
+})
+
+test('invalid or missing test clock uses the real browser time', () => {
+	const missing = createClientClock('', 1_000)
+	const invalid = createClientClock('?alert_test_at=invalid', 1_000)
+	assert.equal(missing.enabled, false)
+	assert.equal(invalid.enabled, false)
+	assert.equal(missing.now(61_000).getTime(), 61_000)
 })

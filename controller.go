@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	controllerStateVersion  = 2
+	controllerStateVersion  = 3
 	reconcileInterval       = 2 * time.Second
 	reconcileRequestTimeout = 12 * time.Second
 	stopDrainTimeout        = 30 * time.Second
@@ -50,9 +50,10 @@ type consumedResume struct {
 }
 
 type desiredState struct {
-	MeetingID      string          `json:"meeting_id"`
-	Generation     uint64          `json:"generation"`
-	ConsumedResume *consumedResume `json:"consumed_resume,omitempty"`
+	MeetingID             string          `json:"meeting_id"`
+	Generation            uint64          `json:"generation"`
+	ScheduleOffsetMinutes int             `json:"schedule_offset_minutes"`
+	ConsumedResume        *consumedResume `json:"consumed_resume,omitempty"`
 }
 
 type desiredStateFile struct {
@@ -67,6 +68,14 @@ type desiredStateUpdate struct {
 	ExpectedGeneration       uint64
 	ConfirmDestructiveResume bool
 	Rearm                    bool
+}
+
+type scheduleOffsetUpdate struct {
+	Minutes            int
+	ExpectedEpoch      string
+	ExpectedRun        uint64
+	ExpectedGeneration uint64
+	ExpectedRevision   uint64
 }
 
 type reconcileCondition struct {
@@ -294,9 +303,10 @@ func newController(parent context.Context, app *app, tokens map[string]string, s
 	return controller, nil
 }
 
-// WHY: v1 included the removed running bit but its meeting/generation remain authoritative.
-// Previously any non-current version aborted startup; now v1 is decoded, validated, and
-// atomically replaced by v2 without starting actors or issuing remote requests.
+// WHY: schedule offsets are operational state and must be present before the controller
+// can safely expose room controls. Previously older state was migrated in place, which
+// could silently discard the new offset contract; the new behavior rejects every older
+// version so an operator explicitly recreates state during this breaking update.
 func loadDesiredStateFile(path string) (desiredStateFile, error) {
 	empty := desiredStateFile{Version: controllerStateVersion, Rooms: map[string]desiredState{}}
 	data, err := os.ReadFile(path)
@@ -318,31 +328,11 @@ func loadDesiredStateFile(path string) (desiredStateFile, error) {
 		if err := json.Unmarshal(data, &file); err != nil {
 			return desiredStateFile{}, fmt.Errorf("decode controller state: %w", err)
 		}
-	case 1:
-		var legacy struct {
-			Version int `json:"version"`
-			Rooms   map[string]struct {
-				MeetingID  string `json:"meeting_id"`
-				Generation uint64 `json:"generation"`
-			} `json:"rooms"`
-		}
-		if err := json.Unmarshal(data, &legacy); err != nil {
-			return desiredStateFile{}, fmt.Errorf("decode legacy controller state: %w", err)
-		}
-		file = empty
-		for room, desired := range legacy.Rooms {
-			file.Rooms[room] = desiredState{MeetingID: desired.MeetingID, Generation: desired.Generation}
-		}
 	default:
 		return desiredStateFile{}, errors.New("controller state has an unsupported version")
 	}
 	if err := validateDesiredStateFile(file); err != nil {
 		return desiredStateFile{}, err
-	}
-	if header.Version == 1 {
-		if err := writeDesiredState(path, file); err != nil {
-			return desiredStateFile{}, fmt.Errorf("migrate controller state to version 2: %w", err)
-		}
 	}
 	return file, nil
 }
@@ -352,7 +342,10 @@ func validateDesiredStateFile(file desiredStateFile) error {
 		return errors.New("controller state has an invalid version or rooms map")
 	}
 	for room, desired := range file.Rooms {
-		if strings.TrimSpace(room) == "" || strings.TrimSpace(desired.MeetingID) == "" || desired.Generation == 0 {
+		if strings.TrimSpace(room) == "" || desired.ScheduleOffsetMinutes < -120 || desired.ScheduleOffsetMinutes > 120 {
+			return errors.New("controller state contains an invalid desired room")
+		}
+		if (strings.TrimSpace(desired.MeetingID) == "") != (desired.Generation == 0) {
 			return errors.New("controller state contains an invalid desired room")
 		}
 		if desired.ConsumedResume != nil {
@@ -360,6 +353,15 @@ func validateDesiredStateFile(file desiredStateFile) error {
 				return errors.New("controller state contains an invalid consumed resume marker")
 			}
 		}
+	}
+	return nil
+}
+
+var errInvalidScheduleOffset = errors.New("schedule offset must be between -120 and 120 minutes")
+
+func validateScheduleOffset(minutes int) error {
+	if minutes < -120 || minutes > 120 {
+		return errInvalidScheduleOffset
 	}
 	return nil
 }
@@ -1233,7 +1235,14 @@ func (c *controller) updateDesired(roomName string, update desiredStateUpdate) (
 		return roomView{}, errDestructiveConfirmation
 	}
 
-	next := desiredState{MeetingID: meetingID, Generation: current.Generation + 1}
+	// WHY: schedule offset is room calibration, not meeting identity. Previously a desired
+	// meeting change rebuilt this value from zero and silently erased the operator's live
+	// timing correction; desired changes now preserve the persisted calibration.
+	next := desiredState{
+		MeetingID: current.MeetingID, Generation: current.Generation + 1,
+		ScheduleOffsetMinutes: current.ScheduleOffsetMinutes,
+	}
+	next.MeetingID = meetingID
 	room.dispatchGate.Lock()
 	defer room.dispatchGate.Unlock()
 	c.storeMu.Lock()
@@ -1280,6 +1289,60 @@ func (c *controller) updateDesired(roomName string, update desiredStateUpdate) (
 	if reconciling {
 		c.notify(room)
 	}
+	c.publish(view)
+	return view, nil
+}
+
+func (c *controller) updateScheduleOffset(roomName string, update scheduleOffsetUpdate) (roomView, error) {
+	if err := validateScheduleOffset(update.Minutes); err != nil {
+		return roomView{}, err
+	}
+	c.mu.RLock()
+	room, found := c.rooms[roomName]
+	if !found {
+		c.mu.RUnlock()
+		return roomView{}, errUnknownRoom
+	}
+	c.mu.RUnlock()
+
+	room.resetMu.Lock()
+	defer room.resetMu.Unlock()
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
+	c.mu.RLock()
+	if update.ExpectedEpoch != c.app.epoch || room.reconciliationRun != update.ExpectedRun ||
+		room.desired.Generation != update.ExpectedGeneration || room.revision != update.ExpectedRevision {
+		view := c.snapshotLocked(room)
+		c.mu.RUnlock()
+		return view, errGenerationConflict
+	}
+	next := room.desired
+	next.ScheduleOffsetMinutes = update.Minutes
+	candidate := cloneStateFile(c.file)
+	candidate.Rooms[roomName] = next
+	c.mu.RUnlock()
+	if err := writeDesiredState(c.statePath, candidate); err != nil {
+		var committed *committedStateError
+		if !errors.As(err, &committed) {
+			return roomView{}, err
+		}
+		c.fatal(err)
+	}
+	c.mu.Lock()
+	// WHY: observations may advance revision while the durable write is in flight. The
+	// request revision was already fenced before the write; checking it again here would
+	// leave disk updated while memory rejects the same offset after an unrelated observe.
+	if update.ExpectedEpoch != c.app.epoch || room.reconciliationRun != update.ExpectedRun ||
+		room.desired.Generation != update.ExpectedGeneration {
+		c.mu.Unlock()
+		return roomView{}, errGenerationConflict
+	}
+	room.desired = next
+	c.file = candidate
+	room.updatedAt = time.Now().UTC()
+	room.revision++
+	view := c.snapshotLocked(room)
+	c.mu.Unlock()
 	c.publish(view)
 	return view, nil
 }
@@ -1793,8 +1856,9 @@ func (c *controller) snapshotLocked(room *controllerRoom) roomView {
 	return roomView{
 		Epoch: c.app.epoch, RoomName: room.name,
 		DesiredMeetingID: room.desired.MeetingID, Generation: room.desired.Generation,
-		ResumeConsumed: room.desired.ConsumedResume != nil,
-		Revision:       room.revision, DesiredStatus: room.desiredStatus,
+		ScheduleOffsetMinutes: room.desired.ScheduleOffsetMinutes,
+		ResumeConsumed:        room.desired.ConsumedResume != nil,
+		Revision:              room.revision, DesiredStatus: room.desiredStatus,
 		Lifecycle: string(room.lifecycle), ReconciliationRun: room.reconciliationRun,
 		ActiveMeetingIDs: append([]string{}, room.activeMeetingIDs...),
 		ActiveObservedAt: room.activeObservedAt, ActiveSetStale: room.activeSetStale || room.lifecycle == reconciliationSuspended,

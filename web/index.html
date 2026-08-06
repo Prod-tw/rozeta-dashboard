@@ -27,6 +27,8 @@
 				</button>
 				<div class="utility-menu" id="utility-menu" hidden>
 					<button type="button" id="messages-button">訊息 <span id="message-count" hidden></span></button>
+					<label class="utility-toggle"><input type="checkbox" id="alert-enabled" /> 啟用時間警報</label>
+					<button type="button" id="test-clock-button">設定測試時間</button>
 					<a href="/setup">快速設定</a>
 					<a href="/debug">開啟除錯頁</a>
 					<button type="button" id="logout-btn">登出</button>
@@ -35,6 +37,7 @@
 		</header>
 
 		<main class="control-shell">
+			<div class="test-clock-banner" id="test-clock-banner" role="status" hidden></div>
 			<section class="selection-strip" aria-labelledby="selected-rooms-title">
 				<p class="section-kicker">工作範圍</p>
 				<div class="selection-layout">
@@ -65,6 +68,7 @@
 					</div>
 					<span class="live-mark" id="operator-status">尚未選擇</span>
 				</div>
+				<div id="operator-alert" aria-live="assertive"></div>
 				<div id="operator-content"></div>
 			</section>
 
@@ -146,6 +150,20 @@
 				<div class="dialog-actions">
 					<button type="button" class="secondary-button" id="room-picker-cancel">取消</button
 					><button type="button" class="primary-button" id="room-picker-apply">套用選擇</button>
+				</div>
+			</form>
+		</dialog>
+		<dialog id="test-clock-dialog">
+			<form method="dialog" class="control-dialog" id="test-clock-form">
+				<p class="section-kicker">測試工具</p>
+				<h2>設定測試時間</h2>
+				<p>設定後會回到目前頁面，時間會從指定值開始並按照真實時間繼續流逝。</p>
+				<label class="test-clock-field"
+					><span>模擬現在時間</span><input id="test-clock-input" type="datetime-local" step="1" required
+				/></label>
+				<div class="dialog-actions">
+					<button type="button" class="secondary-button" id="test-clock-clear">恢復真實時間</button>
+					<button type="submit" class="primary-button">套用並重新導向</button>
 				</div>
 			</form>
 		</dialog>

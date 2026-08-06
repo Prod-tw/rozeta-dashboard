@@ -208,6 +208,7 @@ func (a *app) router() (*gin.Engine, error) {
 	// admin middleware. Serving only the public CSS and script allowlist keeps the
 	// authenticated page itself behind requireAdmin.
 	router.GET("/assets/:name", a.handleAsset)
+	router.GET("/service-worker.js", a.handleServiceWorker)
 	router.GET("/favicon.ico", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	router.GET("/login", a.handleLogin)
 	router.POST("/api/login", a.requireSameOrigin, a.handleLoginRequest)
@@ -224,6 +225,7 @@ func (a *app) router() (*gin.Engine, error) {
 	protected.POST("/api/setup/artifacts", a.requireSameOrigin, a.handleSetupArtifacts)
 	protected.GET("/api/rooms/:roomName/meetings", a.handleRoomMeetings)
 	protected.PUT("/api/rooms/:roomName/desired-state", a.requireSameOrigin, a.handleDesiredState)
+	protected.PUT("/api/rooms/:roomName/schedule-offset", a.requireSameOrigin, a.handleScheduleOffset)
 	protected.POST("/api/rooms/:roomName/reconciliation/:action/preflight", a.requireSameOrigin, a.handleRoomReconciliationPreflight)
 	protected.POST("/api/rooms/:roomName/observe", a.requireSameOrigin, a.handleObserveRoom)
 	protected.POST("/api/rooms/:roomName/reconciliation/:action", a.requireSameOrigin, a.handleRoomReconciliation)
@@ -291,6 +293,15 @@ func (a *app) handleAsset(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, contentType, data)
+}
+
+func (a *app) handleServiceWorker(c *gin.Context) {
+	data, err := webAssets.ReadFile("web/service-worker.js")
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Data(http.StatusOK, "text/javascript; charset=utf-8", data)
 }
 
 func (a *app) handleIndex(c *gin.Context) {
@@ -531,6 +542,14 @@ type desiredStateRequest struct {
 	Rearm                     bool    `json:"rearm"`
 }
 
+type scheduleOffsetRequest struct {
+	Minutes                   int     `json:"minutes"`
+	Epoch                     string  `json:"epoch"`
+	ExpectedReconciliationRun *uint64 `json:"expected_reconciliation_run"`
+	ExpectedGeneration        *uint64 `json:"expected_generation"`
+	ExpectedRevision          *uint64 `json:"expected_revision"`
+}
+
 func (a *app) handleDesiredState(c *gin.Context) {
 	roomName := strings.TrimSpace(c.Param("roomName"))
 	var request desiredStateRequest
@@ -566,6 +585,37 @@ func (a *app) handleDesiredState(c *gin.Context) {
 			status = http.StatusConflict
 		case errors.Is(err, errDestructiveConfirmation):
 			status = http.StatusUnprocessableEntity
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, room)
+}
+
+func (a *app) handleScheduleOffset(c *gin.Context) {
+	roomName := strings.TrimSpace(c.Param("roomName"))
+	var request scheduleOffsetRequest
+	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.Epoch) == "" ||
+		request.ExpectedReconciliationRun == nil || request.ExpectedGeneration == nil || request.ExpectedRevision == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "epoch, expected_reconciliation_run, expected_generation, and expected_revision are required"})
+		return
+	}
+	room, err := a.controller.updateScheduleOffset(roomName, scheduleOffsetUpdate{
+		Minutes: request.Minutes, ExpectedEpoch: request.Epoch,
+		ExpectedRun: *request.ExpectedReconciliationRun, ExpectedGeneration: *request.ExpectedGeneration,
+		ExpectedRevision: *request.ExpectedRevision,
+	})
+	if errors.Is(err, errGenerationConflict) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "room": room})
+		return
+	}
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, errUnknownRoom):
+			status = http.StatusNotFound
+		case errors.Is(err, errInvalidScheduleOffset):
+			status = http.StatusBadRequest
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
@@ -809,25 +859,26 @@ type adminEnvelope struct {
 }
 
 type roomView struct {
-	Epoch             string               `json:"epoch"`
-	RoomName          string               `json:"room_name"`
-	DesiredMeetingID  string               `json:"desired_meeting_id,omitempty"`
-	Generation        uint64               `json:"generation"`
-	ResumeConsumed    bool                 `json:"resume_consumed"`
-	Revision          uint64               `json:"revision"`
-	DesiredStatus     string               `json:"desired_status,omitempty"`
-	Lifecycle         string               `json:"lifecycle"`
-	ReconciliationRun uint64               `json:"reconciliation_run"`
-	ActiveMeetingIDs  []string             `json:"active_meeting_ids"`
-	ActiveObservedAt  time.Time            `json:"active_observed_at,omitempty,omitzero"`
-	ActiveSetStale    bool                 `json:"active_set_stale"`
-	ResetReady        bool                 `json:"reset_ready"`
-	Resetting         bool                 `json:"resetting"`
-	Summary           string               `json:"summary"`
-	SummaryReason     string               `json:"summary_reason"`
-	Conditions        []reconcileCondition `json:"conditions"`
-	RecentActions     []recentAction       `json:"recent_actions"`
-	LastError         string               `json:"last_error,omitempty"`
-	Meetings          []roomMeetingView    `json:"meetings"`
-	UpdatedAt         time.Time            `json:"updated_at,omitempty,omitzero"`
+	Epoch                 string               `json:"epoch"`
+	RoomName              string               `json:"room_name"`
+	DesiredMeetingID      string               `json:"desired_meeting_id,omitempty"`
+	Generation            uint64               `json:"generation"`
+	ScheduleOffsetMinutes int                  `json:"schedule_offset_minutes"`
+	ResumeConsumed        bool                 `json:"resume_consumed"`
+	Revision              uint64               `json:"revision"`
+	DesiredStatus         string               `json:"desired_status,omitempty"`
+	Lifecycle             string               `json:"lifecycle"`
+	ReconciliationRun     uint64               `json:"reconciliation_run"`
+	ActiveMeetingIDs      []string             `json:"active_meeting_ids"`
+	ActiveObservedAt      time.Time            `json:"active_observed_at,omitempty,omitzero"`
+	ActiveSetStale        bool                 `json:"active_set_stale"`
+	ResetReady            bool                 `json:"reset_ready"`
+	Resetting             bool                 `json:"resetting"`
+	Summary               string               `json:"summary"`
+	SummaryReason         string               `json:"summary_reason"`
+	Conditions            []reconcileCondition `json:"conditions"`
+	RecentActions         []recentAction       `json:"recent_actions"`
+	LastError             string               `json:"last_error,omitempty"`
+	Meetings              []roomMeetingView    `json:"meetings"`
+	UpdatedAt             time.Time            `json:"updated_at,omitempty,omitzero"`
 }

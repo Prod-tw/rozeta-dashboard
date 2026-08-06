@@ -18,6 +18,7 @@ Startup validates the account/session/OPASS/Rozeta intersection once. Malformed 
 - `go test -race -shuffle=on ./...` is the CI concurrency gate.
 - `pnpm test` runs the browser state-model tests.
 - `pnpm format:check` checks the web assets, package metadata, and `.prettierrc`; formatting uses the repository `.prettierrc`.
+- The controller state format is version 3. Older state files are rejected without migration; recreate the state file for this breaking update.
 
 ## Boundaries
 
