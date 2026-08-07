@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -53,74 +54,175 @@ type majorErrorState struct {
 }
 
 func main() {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
+		log.Print(err)
+		os.Exit(1)
+	}
+}
+
+type runtimeConfig struct {
+	accountFile string
+	sessionFile string
+	stateFile   string
+}
+
+// serverSecrets are only needed by the HTTP authentication and external API routes;
+// the direct reset command operates on the controller and account tokens locally.
+type serverSecrets struct {
+	adminPassword    string
+	sessionSecret    []byte
+	externalAPIToken string
+}
+
+// applicationRuntime owns the shared controller setup so the server and reset CLI use
+// the same startup validation and remote-account wiring instead of maintaining two paths.
+type applicationRuntime struct {
+	app            *app
+	controller     *controller
+	startupSummary string
+	startupErr     error
+}
+
+func (r *applicationRuntime) close() {
+	r.controller.close()
+	r.app.state.closeAdmins()
+}
+
+func run(args []string, output io.Writer) error {
 	// The generic account filename replaces the previous room-token-specific CLI name
 	// so operators now provide the required credentials with -account.
-	accountFile := flag.String("account", "", "path to required account CSV file")
-	sessionFile := flag.String("session", "", "path to required session CSV file")
-	stateFile := flag.String("state", "controller-state.json", "path to persistent controller state")
-	flag.Parse()
-
+	flags := flag.NewFlagSet("caption", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	accountFile := flags.String("account", "", "path to required account CSV file")
+	sessionFile := flags.String("session", "", "path to required session CSV file")
+	stateFile := flags.String("state", "controller-state.json", "path to persistent controller state")
+	resetSpec := flags.String("reset", "", "reset selected agendas using DATE|all,ROOM|all")
+	resetMaxAge := flags.Int("reset-max-age", defaultResetJobMaxAge, "maximum reset workflow job age")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	resetRequested := false
+	flags.Visit(func(parsedFlag *flag.Flag) {
+		if parsedFlag.Name == "reset" {
+			resetRequested = true
+		}
+	})
+	if resetRequested && strings.TrimSpace(*resetSpec) == "" {
+		return errors.New("-reset requires a selector")
+	}
 	if strings.TrimSpace(*accountFile) == "" {
-		log.Fatal("-account is required")
+		return errors.New("-account is required")
 	}
-	adminPassword := os.Getenv("ADMIN_PASSWORD")
-	if adminPassword == "" {
-		log.Fatal("ADMIN_PASSWORD is required")
+	if *resetMaxAge < 0 {
+		return errors.New("-reset-max-age must not be negative")
 	}
-	sessionSecret := []byte(os.Getenv("SESSION_SECRET"))
-	if len(sessionSecret) < 32 {
-		log.Fatal("SESSION_SECRET must contain at least 32 bytes")
-	}
-	externalAPIToken := strings.TrimSpace(os.Getenv("EXTERNAL_API_TOKEN"))
-	if externalAPIToken == "" {
-		log.Fatal("EXTERNAL_API_TOKEN is required")
-	}
-	tokens, err := loadRoomTokens(*accountFile)
-	if err != nil {
-		log.Fatalf("load token file: %v", err)
+	secrets := serverSecrets{}
+	if !resetRequested {
+		var err error
+		secrets, err = loadServerSecrets()
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	_, err = loadDesiredStateFile(*stateFile)
+	runtime, err := newApplicationRuntime(ctx, runtimeConfig{
+		accountFile: *accountFile,
+		sessionFile: *sessionFile,
+		stateFile:   *stateFile,
+	}, secrets)
 	if err != nil {
-		log.Fatalf("load controller state: %v", err)
+		return err
 	}
+	defer runtime.close()
+
+	if resetRequested {
+		if runtime.startupErr != nil {
+			return runtime.startupErr
+		}
+		return runResetWorkflow(ctx, runtime.controller, *resetSpec, *resetMaxAge, output)
+	}
+	return runServer(runtime)
+}
+
+func loadServerSecrets() (serverSecrets, error) {
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
+	if adminPassword == "" {
+		return serverSecrets{}, errors.New("ADMIN_PASSWORD is required")
+	}
+	sessionSecret := []byte(os.Getenv("SESSION_SECRET"))
+	if len(sessionSecret) < 32 {
+		return serverSecrets{}, errors.New("SESSION_SECRET must contain at least 32 bytes")
+	}
+	externalAPIToken := strings.TrimSpace(os.Getenv("EXTERNAL_API_TOKEN"))
+	if externalAPIToken == "" {
+		return serverSecrets{}, errors.New("EXTERNAL_API_TOKEN is required")
+	}
+	return serverSecrets{
+		adminPassword:    adminPassword,
+		sessionSecret:    sessionSecret,
+		externalAPIToken: externalAPIToken,
+	}, nil
+}
+
+func newApplicationRuntime(ctx context.Context, config runtimeConfig, secrets serverSecrets) (*applicationRuntime, error) {
+	tokens, err := loadRoomTokens(config.accountFile)
+	if err != nil {
+		return nil, fmt.Errorf("load token file: %w", err)
+	}
+	if _, err := loadDesiredStateFile(config.stateFile); err != nil {
+		return nil, fmt.Errorf("load controller state: %w", err)
+	}
+
 	schedule := meetingSchedule{starts: make(map[string]time.Time), snapshots: make(map[string][]roomMeetingView)}
-	if strings.TrimSpace(*sessionFile) == "" {
-		err = errors.New("-session is required for strict meeting schedule validation")
+	var startupScheduleErr error
+	if strings.TrimSpace(config.sessionFile) == "" {
+		startupScheduleErr = errors.New("-session is required for strict meeting schedule validation")
 	} else {
-		schedule, _, err = loadMeetingSchedule(ctx, *sessionFile)
+		schedule, _, startupScheduleErr = loadMeetingSchedule(ctx, config.sessionFile)
 	}
-	// Previously OPASS and session failures degraded to an unscheduled admin list.
-	// Keep the server reachable for diagnosis, but defer all normal handlers behind
-	// the major-error gate when this startup validation cannot complete.
-	startupScheduleErr := err
 
 	gin.SetMode(gin.ReleaseMode)
-	a := newApp(ctx, tokens, adminPassword, sessionSecret)
-	a.externalAPIToken = externalAPIToken
+	a := newApp(ctx, tokens, secrets.adminPassword, secrets.sessionSecret)
+	a.externalAPIToken = secrets.externalAPIToken
 	a.meetingSchedule = schedule
-	controller, err := newController(ctx, a, tokens, schedule, *stateFile)
+	controller, err := newController(ctx, a, tokens, schedule, config.stateFile)
 	if err != nil {
-		log.Fatalf("load controller state: %v", err)
+		return nil, fmt.Errorf("load controller state: %w", err)
 	}
 	a.controller = controller
+	runtime := &applicationRuntime{app: a, controller: controller}
 	if startupScheduleErr != nil {
-		a.setMajorError("startup schedule validation failed", startupScheduleErr)
-	} else if err := controller.validateStartupMeetings(ctx); err != nil {
-		a.setMajorError("startup Rozeta meeting validation failed", err)
+		runtime.startupSummary = "startup schedule validation failed"
+		runtime.startupErr = startupScheduleErr
+		return runtime, nil
 	}
-	router, err := a.router()
+	if err := controller.validateStartupMeetings(ctx); err != nil {
+		runtime.startupSummary = "startup Rozeta meeting validation failed"
+		runtime.startupErr = err
+	}
+	return runtime, nil
+}
+
+func runServer(runtime *applicationRuntime) error {
+	if runtime.startupErr != nil {
+		runtime.app.setMajorError(runtime.startupSummary, runtime.startupErr)
+	}
+	router, err := runtime.app.router()
 	if err != nil {
-		log.Fatalf("configure router: %v", err)
+		return fmt.Errorf("configure router: %w", err)
 	}
 
 	// Reconciliation used to start for every room during process startup. Lifecycle
 	// is now process-local and explicitly operator-controlled, so startup exposes
 	// persisted desired state while every room remains stopped.
-	defer a.controller.close()
-	defer a.state.closeAdmins()
 	server := &http.Server{
 		Addr:              ":8080",
 		Handler:           router,
@@ -136,7 +238,7 @@ func main() {
 	}()
 
 	select {
-	case <-ctx.Done():
+	case <-runtime.app.ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
@@ -144,9 +246,10 @@ func main() {
 		}
 	case err := <-serverErrors:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("serve: %v", err)
+			return fmt.Errorf("serve: %w", err)
 		}
 	}
+	return nil
 }
 
 func newApp(ctx context.Context, tokens map[string]string, adminPassword string, sessionSecret []byte) *app {

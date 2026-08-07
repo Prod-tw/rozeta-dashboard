@@ -13,6 +13,16 @@ export EXTERNAL_API_TOKEN='replace-with-a-long-machine-token'
 go run . -account account.csv -session session.csv -state controller-state.json
 ```
 
+To reset only selected agendas without starting the HTTP server, pass a date and room selector separated by exactly one comma:
+
+```sh
+go run . -account account.csv -session session.csv -state controller-state.json -reset 2026/8/8,all
+go run . -account account.csv -session session.csv -state controller-state.json -reset all,RB101
+go run . -account account.csv -session session.csv -state controller-state.json -reset all,all -reset-max-age 8
+```
+
+The date uses `Asia/Taipei` and accepts `YYYY/M/D`; `all` disables that filter. The room name is matched exactly, or `all` selects every room. The reset workflow observes each selected agenda, stops only rooms that need it, and resumes only selected paused or completed agendas. `ready` agendas are reported as already ready. It uses a bounded worker pool and continues processing after a job failure; the command exits with status 1 if any selected agenda fails.
+
 The account CSV starts with `account,User ID,Token` or `帳號,User ID,Token`. Configure OBS with Rozeta's authenticated embed URL, including `client=obs`; when navigation is needed, the controller sends normal `goto_meeting` followed by OBS-targeted `goto_meeting_embed`.
 
 The versioned state file is authoritative and must be retained across restarts. Desired state contains the meeting ID, generation, and persisted automatic-Resume consumption record; lifecycle and run intent are process-local. An existing version 1 state file is atomically migrated to version 2 by preserving meeting IDs and generations and dropping `running`. Migration never starts reconciliation or sends a Rozeta command. A malformed or unsupported state file stops startup.

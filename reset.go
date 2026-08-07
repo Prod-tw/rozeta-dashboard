@@ -229,6 +229,89 @@ func (c *controller) resetReadyRoom(ctx context.Context, roomName, epoch string,
 	return c.snapshotRoom(room), results, nil
 }
 
+// resetSelectedMeeting keeps the destructive reset workflow scoped to one selected agenda.
+// The existing room reset intentionally requires and resets every remote meeting in a room;
+// the CLI now needs date/room selection, so it performs the same empty-active-set and fencing
+// checks while issuing at most one Resume for the requested meeting.
+func (c *controller) resetSelectedMeeting(ctx context.Context, roomName, meetingID string) (result resetReadyResult, resultErr error) {
+	c.mu.RLock()
+	room, found := c.rooms[roomName]
+	if !found {
+		c.mu.RUnlock()
+		return resetReadyResult{MeetingID: meetingID, Outcome: "failed", Error: errUnknownRoom.Error()}, errUnknownRoom
+	}
+	run := room.reconciliationRun
+	generation := room.desired.Generation
+	c.mu.RUnlock()
+
+	room.resetMu.Lock()
+	defer room.resetMu.Unlock()
+
+	c.mu.Lock()
+	if room.lifecycle != reconciliationSuspended || room.resetting {
+		c.mu.Unlock()
+		return resetReadyResult{MeetingID: meetingID, Outcome: "failed", Error: errResetNotStopped.Error()}, errResetNotStopped
+	}
+	room.resetting = true
+	room.revision++
+	view := c.snapshotLocked(room)
+	c.mu.Unlock()
+	c.publish(view)
+
+	defer func() {
+		c.mu.Lock()
+		room.resetting = false
+		room.revision++
+		view := c.snapshotLocked(room)
+		c.mu.Unlock()
+		c.publish(view)
+	}()
+
+	result = resetReadyResult{MeetingID: meetingID, Attempts: 1}
+	active, err := c.listActiveMeetings(ctx, room)
+	if err != nil {
+		result.Outcome, result.Error = "failed", err.Error()
+		return result, err
+	}
+	if len(active) != 0 {
+		c.recordResetObservation(room, active, false)
+		result.Outcome, result.Error = "failed", errResetActive.Error()
+		return result, errResetActive
+	}
+	c.recordResetObservation(room, active, true)
+
+	meeting, err := c.getMeeting(ctx, room, meetingID)
+	if err != nil {
+		result.Outcome, result.Error = "failed", err.Error()
+		return result, err
+	}
+	result.Status = meeting.Status
+	switch meeting.Status {
+	case "ready":
+		result.Outcome = "already_ready"
+		return result, nil
+	case "paused", "completed":
+	default:
+		result.Outcome = "failed"
+		result.Error = fmt.Sprintf("unsupported meeting status %q", meeting.Status)
+		return result, fmt.Errorf("unsupported meeting status %q", meeting.Status)
+	}
+
+	select {
+	case c.resetSlots <- struct{}{}:
+		defer func() { <-c.resetSlots }()
+	case <-ctx.Done():
+		result.Outcome, result.Error = "failed", ctx.Err().Error()
+		return result, ctx.Err()
+	}
+	if err := c.resetResume(ctx, room, meetingID, run, generation); err != nil {
+		result.Outcome, result.Error = "failed", err.Error()
+		return result, err
+	}
+	result.Status, result.Outcome = "ready", "reset"
+	return result, nil
+}
+
 func resetReadyMeetings(ctx context.Context, c *controller, room *controllerRoom, meetings []roomMeetingView, run, generation uint64) []resetReadyResult {
 	results := make([]resetReadyResult, len(meetings))
 	if len(meetings) == 0 {

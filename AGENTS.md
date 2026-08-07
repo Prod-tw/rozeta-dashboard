@@ -8,6 +8,12 @@ Set `ADMIN_PASSWORD`, `SESSION_SECRET` (at least 32 bytes), and `EXTERNAL_API_TO
 go run . -account account.csv -session session.csv -state controller-state.json
 ```
 
+To reset selected agendas without starting the HTTP server, use `-reset DATE,ROOM` with
+`all` as either selector, for example `go run . -account account.csv -session session.csv
+-state controller-state.json -reset 2026/8/8,all`. The date uses `Asia/Taipei`; room names
+are exact matches. `-reset-max-age` defaults to 8, and the command exits non-zero after
+processing all jobs if any selected agenda cannot be reset.
+
 `-account` and `-session` are required. The default HTTP listener is `:8080`; `-state` defaults to `controller-state.json`. `compose.yaml` uses the same inputs from `/data`, persists state in the `controller-state` volume, and requires all three environment variables before creating the container.
 
 Startup validates the account/session/OPASS/Rozeta intersection once. Malformed data, duplicate IDs, invalid retained schedule data, or remote validation failures leave the process serving only a `503` diagnostic page. A malformed or unsupported state file exits instead. Version 1 state is atomically migrated to version 2 without reconciliation or remote commands.
