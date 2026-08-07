@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="theme-color" content="#eef2ed" />
+		<title>教室進度時間軸 | COSCUP</title>
+		<link rel="stylesheet" href="/assets/timeline.css" />
+	</head>
+	<body class="timeline-page">
+		<header class="timeline-header">
+			<div class="timeline-title">
+				<p class="eyebrow">即時監看</p>
+				<h1>教室進度時間軸</h1>
+			</div>
+			<div class="timeline-tools">
+				<label class="day-picker">
+					<span>活動日</span>
+					<select id="event-day-select" aria-label="選擇活動日"></select>
+				</label>
+				<span class="connection-pill" id="ws-status" role="status">連線中</span>
+				<span class="last-updated" id="last-updated">尚未收到資料</span>
+				<a class="back-link" href="/">返回主控台</a>
+			</div>
+		</header>
+
+		<main class="timeline-shell">
+			<div class="timeline-meta">
+				<div class="timeline-legend" aria-label="狀態圖例">
+					<span class="legend-group-title">議程狀態</span>
+					<span class="legend-item"><i class="legend-swatch status-ready"></i>尚未開始</span>
+					<span class="legend-item"><i class="legend-swatch status-in-progress"></i>進行中</span>
+					<span class="legend-item"><i class="legend-swatch status-paused"></i>已暫停</span>
+					<span class="legend-item"><i class="legend-swatch status-completed"></i>已完成</span>
+					<span class="legend-item"><i class="legend-swatch status-error"></i>異常</span>
+					<span class="legend-group-title">排程</span>
+					<span class="legend-item"><i class="legend-swatch legend-original"></i>原始</span>
+					<span class="legend-item"><i class="legend-swatch legend-adjusted"></i>調整後</span>
+				</div>
+				<div class="timeline-notice" id="timeline-notice" role="status" hidden></div>
+			</div>
+
+			<section class="timeline-panel" aria-label="所有教室的議程時間軸">
+				<div class="timeline-body" id="timeline-body">
+					<div class="time-ruler" aria-hidden="true">
+						<div class="time-ruler-header"></div>
+						<div class="time-ruler-track" id="time-ruler-track"></div>
+					</div>
+					<div class="room-scroll" id="room-scroll">
+						<div class="room-columns" id="room-columns"></div>
+					</div>
+					<div class="now-line" id="now-line" aria-hidden="true">
+						<span id="now-label"></span>
+					</div>
+				</div>
+			</section>
+		</main>
+
+		<script src="/assets/timeline.js" type="module"></script>
+	</body>
+</html>

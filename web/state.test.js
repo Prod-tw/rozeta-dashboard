@@ -25,6 +25,13 @@ import {
 	roomNameIncludes,
 	visibleRooms,
 } from './state.js'
+import {
+	intersectsTimelineWindow,
+	shiftedMeetingTimes,
+	timelinePositionPercent,
+	timelineQuarterHourTicks,
+	timelineWindow,
+} from './timeline-model.js'
 
 test('a restarted process can replace a higher old revision', () => {
 	const oldRoom = { room_name: 'room-a', generation: 3, revision: 40 }
@@ -386,4 +393,60 @@ test('invalid or missing test clock uses the real browser time', () => {
 	assert.equal(missing.enabled, false)
 	assert.equal(invalid.enabled, false)
 	assert.equal(missing.now(61_000).getTime(), 61_000)
+})
+
+test('timeline window stays centered on now and uses quarter-hour ticks', () => {
+	const now = new Date('2026-08-08T10:15:00+08:00')
+	const window = timelineWindow(now)
+	assert.equal(window.start.toISOString(), '2026-08-08T01:15:00.000Z')
+	assert.equal(window.end.toISOString(), '2026-08-08T03:15:00.000Z')
+	assert.deepEqual(
+		timelineQuarterHourTicks(window.start, window.end).map(value => value.toISOString()),
+		[
+			'2026-08-08T01:15:00.000Z',
+			'2026-08-08T01:30:00.000Z',
+			'2026-08-08T01:45:00.000Z',
+			'2026-08-08T02:00:00.000Z',
+			'2026-08-08T02:15:00.000Z',
+			'2026-08-08T02:30:00.000Z',
+			'2026-08-08T02:45:00.000Z',
+			'2026-08-08T03:00:00.000Z',
+			'2026-08-08T03:15:00.000Z',
+		],
+	)
+})
+
+test('timeline offset preserves the original window and shifts the adjusted window', () => {
+	const shifted = shiftedMeetingTimes(
+		{ scheduled_start: '2026-08-08T10:00:00+08:00', scheduled_end: '2026-08-08T10:40:00+08:00' },
+		5,
+	)
+	assert.equal(shifted.originalStart.toISOString(), '2026-08-08T02:00:00.000Z')
+	assert.equal(shifted.originalEnd.toISOString(), '2026-08-08T02:40:00.000Z')
+	assert.equal(shifted.adjustedStart.toISOString(), '2026-08-08T02:05:00.000Z')
+	assert.equal(shifted.adjustedEnd.toISOString(), '2026-08-08T02:45:00.000Z')
+})
+
+test('timeline renders meetings that cross either 60-minute boundary', () => {
+	const window = timelineWindow(new Date('2026-08-08T10:15:00+08:00'))
+	assert.equal(
+		intersectsTimelineWindow(new Date('2026-08-08T08:50:00+08:00'), new Date('2026-08-08T09:30:00+08:00'), window),
+		true,
+	)
+	assert.equal(
+		intersectsTimelineWindow(new Date('2026-08-08T11:00:00+08:00'), new Date('2026-08-08T11:40:00+08:00'), window),
+		true,
+	)
+	assert.equal(
+		intersectsTimelineWindow(new Date('2026-08-08T07:00:00+08:00'), new Date('2026-08-08T08:00:00+08:00'), window),
+		false,
+	)
+})
+
+test('timeline positions are finite percentages across the full time window', () => {
+	const window = timelineWindow(new Date('2026-08-08T10:15:00+08:00'))
+	assert.equal(timelinePositionPercent(window.start, window), 0)
+	assert.equal(timelinePositionPercent(new Date('2026-08-08T10:15:00+08:00'), window), 50)
+	assert.equal(timelinePositionPercent(window.end, window), 100)
+	assert.equal(timelinePositionPercent(new Date('invalid'), window), null)
 })

@@ -321,6 +321,9 @@ func (a *app) router() (*gin.Engine, error) {
 	protected.GET("/", a.handleIndex)
 	protected.GET("/setup", a.handleSetup)
 	protected.GET("/debug", a.handleDebug)
+	// The timeline was not previously available as a separate view. It is now protected like the control console because
+	// the read-only page exposes live room state and errors without providing mutation controls.
+	protected.GET("/timeline", a.handleTimeline)
 	protected.POST("/api/logout", a.requireSameOrigin, a.handleLogout)
 	router.GET("/api/v1/rooms/:roomName/in-progress", a.handleCurrentMeeting)
 	router.POST("/api/v1/rooms/:roomName/actions/advance-and-start", a.requireExternalAPI, a.handleAdvanceAndStart)
@@ -374,15 +377,18 @@ func (a *app) writeMajorError(c *gin.Context, state *majorErrorState) {
 
 func (a *app) handleAsset(c *gin.Context) {
 	contentTypes := map[string]string{
-		"app.js":      "text/javascript; charset=utf-8",
-		"control.js":  "text/javascript; charset=utf-8",
-		"control.css": "text/css; charset=utf-8",
-		"login.js":    "text/javascript; charset=utf-8",
-		"setup.css":   "text/css; charset=utf-8",
-		"setup.js":    "text/javascript; charset=utf-8",
-		"styles.css":  "text/css; charset=utf-8",
-		"tooltips.js": "text/javascript; charset=utf-8",
-		"state.js":    "text/javascript; charset=utf-8",
+		"app.js":            "text/javascript; charset=utf-8",
+		"control.js":        "text/javascript; charset=utf-8",
+		"control.css":       "text/css; charset=utf-8",
+		"login.js":          "text/javascript; charset=utf-8",
+		"setup.css":         "text/css; charset=utf-8",
+		"setup.js":          "text/javascript; charset=utf-8",
+		"styles.css":        "text/css; charset=utf-8",
+		"timeline.css":      "text/css; charset=utf-8",
+		"timeline.js":       "text/javascript; charset=utf-8",
+		"timeline-model.js": "text/javascript; charset=utf-8",
+		"tooltips.js":       "text/javascript; charset=utf-8",
+		"state.js":          "text/javascript; charset=utf-8",
 	}
 	name := c.Param("name")
 	contentType, ok := contentTypes[name]
@@ -417,6 +423,10 @@ func (a *app) handleSetup(c *gin.Context) {
 
 func (a *app) handleDebug(c *gin.Context) {
 	a.handlePage(c, "debug.html")
+}
+
+func (a *app) handleTimeline(c *gin.Context) {
+	a.handlePage(c, "timeline.html")
 }
 
 func (a *app) handlePage(c *gin.Context, name string) {

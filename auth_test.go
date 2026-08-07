@@ -109,6 +109,7 @@ func TestPageAndWebSocketRequireAdminSession(t *testing.T) {
 	}{
 		{name: "admin page redirects", path: "/", wantStatus: http.StatusSeeOther},
 		{name: "setup page redirects", path: "/setup", wantStatus: http.StatusSeeOther},
+		{name: "timeline page redirects", path: "/timeline", wantStatus: http.StatusSeeOther},
 		{name: "websocket rejects", path: "/ws/admin", wantStatus: http.StatusUnauthorized},
 	}
 	for _, test := range tests {
@@ -139,6 +140,9 @@ func TestPublicAssetAllowlist(t *testing.T) {
 		{name: "tooltip script is public", path: "/assets/tooltips.js", wantStatus: http.StatusOK},
 		{name: "setup script is public", path: "/assets/setup.js", wantStatus: http.StatusOK},
 		{name: "setup stylesheet is public", path: "/assets/setup.css", wantStatus: http.StatusOK},
+		{name: "timeline script is public", path: "/assets/timeline.js", wantStatus: http.StatusOK},
+		{name: "timeline model is public", path: "/assets/timeline-model.js", wantStatus: http.StatusOK},
+		{name: "timeline stylesheet is public", path: "/assets/timeline.css", wantStatus: http.StatusOK},
 		{name: "missing favicon is empty", path: "/favicon.ico", wantStatus: http.StatusNoContent},
 		{name: "embedded admin page stays protected", path: "/assets/index.html", wantStatus: http.StatusNotFound},
 	}
