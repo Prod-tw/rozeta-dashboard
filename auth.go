@@ -20,6 +20,7 @@ import (
 const (
 	adminSessionCookie = "rozeta_admin_session"
 	adminSessionTTL    = 72 * time.Hour
+	defaultLoginPath   = "/setup"
 	loginWindow        = 5 * time.Minute
 	loginAttemptLimit  = 10
 	loginClientLimit   = 4096
@@ -192,11 +193,12 @@ func (a *app) handleLoginRequest(c *gin.Context) {
 func safeRedirectPath(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.ContainsAny(value, "\\\r\n") {
-		return "/"
+		// Login previously fell back to the control console; /setup is now the default entry point.
+		return defaultLoginPath
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") {
-		return "/"
+		return defaultLoginPath
 	}
 	return value
 }

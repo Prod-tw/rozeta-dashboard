@@ -194,9 +194,9 @@ func TestLoginUsesSafeRedirect(t *testing.T) {
 		want     string
 	}{
 		{name: "requested local page", redirect: "/setup", want: "/setup"},
-		{name: "missing redirect", want: "/"},
-		{name: "external redirect", redirect: "https://example.com", want: "/"},
-		{name: "protocol relative redirect", redirect: "//example.com", want: "/"},
+		{name: "missing redirect", want: "/setup"},
+		{name: "external redirect", redirect: "https://example.com", want: "/setup"},
+		{name: "protocol relative redirect", redirect: "//example.com", want: "/setup"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -220,12 +220,12 @@ func TestLoginUsesSafeRedirect(t *testing.T) {
 
 func TestSetupArtifactsSkipPreparationMeeting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	a := newApp(context.Background(), map[string]string{"room-a": "token-a"}, "password", []byte("01234567890123456789012345678901"))
+	a := newApp(context.Background(), map[string]string{"TR509": "token-a"}, "password", []byte("01234567890123456789012345678901"))
 	a.controller = &controller{
 		app: a,
 		rooms: map[string]*controllerRoom{
-			"room-a": {
-				name:     "room-a",
+			"TR509": {
+				name:     "TR509",
 				meetings: []roomMeetingView{preparationMeeting(), {ID: "meeting-first"}, {ID: "meeting-second"}},
 			},
 		},
@@ -238,7 +238,7 @@ func TestSetupArtifactsSkipPreparationMeeting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAdminSession() error = %v", err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/setup/artifacts", strings.NewReader(`{"room_name":"room-a"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/setup/artifacts", strings.NewReader(`{"room_name":"TR509"}`))
 	request.Header.Set("content-type", "application/json")
 	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: session})
 	recorder := httptest.NewRecorder()
@@ -248,16 +248,16 @@ func TestSetupArtifactsSkipPreparationMeeting(t *testing.T) {
 	}
 	body := recorder.Body.String()
 	for _, expected := range []string{
-		`"meeting_id":"meeting-first"`,
+		`"meeting_id":"G8EK9LOCsr"`,
 		`auth_token=token-a`,
-		`https://rozeta.app/api/web/meetings/meeting-first/embed?clientId=obs\u0026token=token-a`,
+		`https://rozeta.app/api/web/meetings/G8EK9LOCsr/embed?clientId=obs\u0026token=token-a`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Errorf("body = %s, missing %q", body, expected)
 		}
 	}
-	if strings.Contains(body, "meeting-second") {
-		t.Fatalf("body = %s, included a non-first meeting", body)
+	if strings.Contains(body, "meeting-first") || strings.Contains(body, "meeting-second") {
+		t.Fatalf("body = %s, used a remotely discovered meeting", body)
 	}
 }
 

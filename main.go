@@ -182,12 +182,13 @@ func newApplicationRuntime(ctx context.Context, config runtimeConfig, secrets se
 	}
 
 	schedule := meetingSchedule{starts: make(map[string]time.Time), snapshots: make(map[string][]roomMeetingView)}
-	var startupScheduleErr error
-	if strings.TrimSpace(config.sessionFile) == "" {
-		startupScheduleErr = errors.New("-session is required for strict meeting schedule validation")
-	} else {
-		schedule, _, startupScheduleErr = loadMeetingSchedule(ctx, config.sessionFile)
-	}
+	// Startup schedule loading is disabled while /setup is the only required flow.
+	// var startupScheduleErr error
+	// if strings.TrimSpace(config.sessionFile) == "" {
+	// 	startupScheduleErr = errors.New("-session is required for strict meeting schedule validation")
+	// } else {
+	// 	schedule, _, startupScheduleErr = loadMeetingSchedule(ctx, config.sessionFile)
+	// }
 
 	gin.SetMode(gin.ReleaseMode)
 	a := newApp(ctx, tokens, secrets.adminPassword, secrets.sessionSecret)
@@ -199,15 +200,16 @@ func newApplicationRuntime(ctx context.Context, config runtimeConfig, secrets se
 	}
 	a.controller = controller
 	runtime := &applicationRuntime{app: a, controller: controller}
-	if startupScheduleErr != nil {
-		runtime.startupSummary = "startup schedule validation failed"
-		runtime.startupErr = startupScheduleErr
-		return runtime, nil
-	}
-	if err := controller.validateStartupMeetings(ctx); err != nil {
-		runtime.startupSummary = "startup Rozeta meeting validation failed"
-		runtime.startupErr = err
-	}
+	// Startup Rozeta meeting validation is disabled while /setup is the only required flow.
+	// if startupScheduleErr != nil {
+	// 	runtime.startupSummary = "startup schedule validation failed"
+	// 	runtime.startupErr = startupScheduleErr
+	// 	return runtime, nil
+	// }
+	// if err := controller.validateStartupMeetings(ctx); err != nil {
+	// 	runtime.startupSummary = "startup Rozeta meeting validation failed"
+	// 	runtime.startupErr = err
+	// }
 	return runtime, nil
 }
 
@@ -462,6 +464,36 @@ type setupResponse struct {
 	OBSURL       string `json:"obs_url,omitempty"`
 }
 
+// The setup flow uses the fixed 8-9 schedule because startup no longer fetches
+// Rozeta meetings to discover the selected meeting for each room.
+var setupMeetingIDs = map[string]string{
+	"AU":      "1bwR87XwWc",
+	"RB101":   "4PvO12UXY5",
+	"RB102":   "vHdhN2EGlQ",
+	"RB105":   "z9v1ThGQ3M",
+	"TR209":   "KDfjhpviuo",
+	"TR210":   "SiwxiV8qYk",
+	"TR211":   "gokZyXYns6",
+	"TR212":   "HCCeCHRxzS",
+	"TR213":   "0VlzYmalE1",
+	"TR214":   "MOkCpNrVOS",
+	"TR310-2": "QH7vnZ3lxb",
+	"TR311":   "LPZGoIUdQ9",
+	"TR313":   "jD60mcAWHU",
+	"TR409-2": "ZWxi0gO9BM",
+	"TR410":   "LPOGoIUdQ9",
+	"TR411":   "XOIcs5Ulmv",
+	"TR412-1": "OPbLnkgLX5",
+	"TR412-2": "4tQO12UXY5",
+	"TR509":   "G8EK9LOCsr",
+	"TR510":   "EYrmMkvhes",
+	"TR511":   "YQJklDKQ0o",
+	"TR512":   "gouZyXYns6",
+	"TR513":   "OPkLnkgLX5",
+	"TR514":   "xBCdNpKG8R",
+	"TR515":   "yZJAAsMWGR",
+}
+
 func (a *app) handleSetupArtifacts(c *gin.Context) {
 	var request setupRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -475,23 +507,7 @@ func (a *app) handleSetupArtifacts(c *gin.Context) {
 		return
 	}
 
-	var meetingID string
-	if a.controller != nil {
-		for _, room := range a.controller.snapshotRooms() {
-			if room.RoomName != roomName {
-				continue
-			}
-			for _, meeting := range room.Meetings {
-				// The setup artifact must target a real Rozeta meeting; the preparation
-				// row is selectable UI state and has no embed endpoint.
-				if meeting.Virtual {
-					continue
-				}
-				meetingID = meeting.ID
-				break
-			}
-		}
-	}
+	meetingID := setupMeetingIDs[roomName]
 
 	// WHY: setup results are deliberately generated only for the selected room, rather
 	// than exposing every account token through the room list or a bulk response.

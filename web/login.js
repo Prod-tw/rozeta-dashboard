@@ -2,7 +2,8 @@ const form = document.getElementById('login-form')
 const passwordInput = document.getElementById('password')
 const loginButton = document.getElementById('login-button')
 const errorNode = document.getElementById('login-error')
-const redirect = new URLSearchParams(window.location.search).get('redirect') || '/'
+// Login previously defaulted to the control console; /setup is now the default entry point.
+const redirect = new URLSearchParams(window.location.search).get('redirect') || '/setup'
 
 const loginErrorMessages = {
 	'too many login attempts': '登入嘗試次數過多，請稍後再試。',
@@ -27,7 +28,7 @@ form.addEventListener('submit', async event => {
 		if (!response.ok) {
 			throw new Error(body?.error || 'sign in failed')
 		}
-		window.location.assign(body?.redirect || '/')
+		window.location.assign(body?.redirect || '/setup')
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error)
 		errorNode.textContent = loginErrorMessages[message] || `登入失敗。技術資訊：${message}`
