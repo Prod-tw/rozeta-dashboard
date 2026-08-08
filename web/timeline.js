@@ -265,13 +265,14 @@ function renderMeetingBlock({
 	const clipsBottom = end > windowEnd
 	const title = escapeHtml(meeting.title || meeting.id)
 	const edgeClasses = `${clipsTop ? ' clips-top' : ''}${clipsBottom ? ' clips-bottom' : ''}`
+	const positionAttributes = `data-timeline-top="${top.toFixed(4)}" data-timeline-height="${height.toFixed(4)}"`
 	if (kind === 'original') {
-		return `<div class="meeting-block original ${statusClassName}${edgeClasses}" style="top:${top}%;height:${height}%" aria-hidden="true"></div>`
+		return `<div class="meeting-block original ${statusClassName}${edgeClasses}" ${positionAttributes} aria-hidden="true"></div>`
 	}
 	const originalTime = `${formatClockTime(originalStart)} - ${formatClockTime(originalEnd)}`
 	const adjustedTime = `${formatClockTime(start)} - ${formatClockTime(end)}`
 	const offsetLabel = offset ? ` (${offset > 0 ? '+' : ''}${offset} 分鐘)` : ''
-	return `<div class="meeting-block adjusted ${statusClassName}${edgeClasses}" style="top:${top}%;height:${height}%" title="${escapeAttr(meeting.title || meeting.id)}">
+	return `<div class="meeting-block adjusted ${statusClassName}${edgeClasses}" ${positionAttributes} title="${escapeAttr(meeting.title || meeting.id)}">
 		<div class="meeting-title">${title}</div>
 		<div class="meeting-status">${escapeHtml(translateMeetingStatus(meeting.status))}</div>
 		<div class="meeting-time">原始 ${escapeHtml(originalTime)}</div>
@@ -305,11 +306,13 @@ function renderTrackTicks(windowStart, windowEnd, ruler = false) {
 function applyTimelinePositions(root) {
 	for (const element of root.querySelectorAll('[data-timeline-top]')) {
 		const top = Number(element.dataset.timelineTop)
-		if (!Number.isFinite(top)) {
+		const height = element.dataset.timelineHeight === undefined ? null : Number(element.dataset.timelineHeight)
+		if (!Number.isFinite(top) || (height !== null && !Number.isFinite(height))) {
 			element.remove()
 			continue
 		}
 		element.style.top = `${top}%`
+		if (height !== null) element.style.height = `${height}%`
 	}
 }
 
